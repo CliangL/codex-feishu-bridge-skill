@@ -443,7 +443,7 @@ class FeishuBridge:
         ws_client = FeishuWSClient(
             app_id=self.cfg.app_id,
             app_secret=self.cfg.app_secret,
-            log_level=lark.LogLevel.INFO,
+            log_level=lark.LogLevel.WARNING,
             event_handler=handler,
             domain=self.cfg.domain,
         )
