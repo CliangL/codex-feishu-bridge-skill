@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Feishu Bridge"
+  short_description: "Set up a local Feishu bot bridge to Codex."
+  default_prompt: "Set up or troubleshoot a local Codex-Feishu bridge."
