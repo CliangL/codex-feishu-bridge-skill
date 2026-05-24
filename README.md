@@ -40,5 +40,6 @@ scripts/verify_codex_feishu_bridge.py --home "$HOME/.codex-feishu"
 - The bundled bridge app is intentionally minimal and sanitized.
 - Scheduled task output can be routed to one Feishu chat with `CODEX_FEISHU_NOTIFY_CHAT_ID`.
 - Feishu-created tasks are mirrored into `$CODEX_HOME/automations` so Codex can see them.
+- Send `/new` or `/reset` to the bot to clear only the current Feishu chat context.
 - The scheduler is timer-based; the wake window is only a resilience bound.
 - No user credentials, chat IDs, logs, conversations, or task stores are included in this repository.

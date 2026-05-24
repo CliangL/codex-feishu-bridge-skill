@@ -48,6 +48,11 @@ from lark_oapi.ws import Client as FeishuWSClient
 
 LOG = logging.getLogger("codex-feishu-bridge")
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11 can still run the bridge without runtime footer metadata.
+    tomllib = None  # type: ignore[assignment]
+
 SENSITIVE_RE = re.compile(
     r"(?i)(app_secret|client_secret|tenant_access_token|app_access_token|"
     r"user_access_token|refresh_token|authorization|api[_-]?key|token)"
@@ -139,6 +144,44 @@ def clamp_text(text: str, limit: int = 15000) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "\n\n[truncated]"
+
+
+def load_codex_runtime(codex_home: Path) -> dict[str, str]:
+    config_path = codex_home / "config.toml"
+    if tomllib is None:
+        return {"model": "", "reasoning_effort": ""}
+    try:
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"model": "", "reasoning_effort": ""}
+    return {
+        "model": str(config.get("model") or "").strip(),
+        "reasoning_effort": str(
+            config.get("model_reasoning_effort") or config.get("reasoning_effort") or ""
+        ).strip(),
+    }
+
+
+def format_elapsed(seconds: float) -> str:
+    total = max(0.0, float(seconds or 0))
+    if total < 60:
+        text = f"{total:.1f} 秒"
+        return text.replace(".0 秒", " 秒")
+    minutes = int(total // 60)
+    rem = int(total % 60)
+    return f"{minutes} 分 {rem:02d} 秒"
+
+
+def codex_footer(codex_home: Path, *, elapsed_seconds: float, tool_count: int = 0) -> str:
+    runtime = load_codex_runtime(codex_home)
+    return " · ".join(
+        [
+            runtime.get("model") or "默认模型",
+            runtime.get("reasoning_effort") or "默认",
+            format_elapsed(elapsed_seconds),
+            f"{max(0, int(tool_count or 0))} 步工具调用",
+        ]
+    )
 
 
 @dataclass(frozen=True)
@@ -248,6 +291,15 @@ class ConversationMemory:
             path.chmod(0o600)
         except OSError:
             pass
+
+    def reset(self, chat_id: str) -> None:
+        path = self._path(chat_id)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            LOG.warning("Failed to reset conversation memory for chat %s", chat_id)
 
 
 class TaskStore:
@@ -514,6 +566,15 @@ class FeishuBridge:
 
     def process_user_turn(self, *, chat_id: str, message_id: str, text: str) -> None:
         LOG.info("Inbound message chat=%s message=%s text=%r", chat_id, message_id, text[:120])
+        if text.strip().lower() in {"/new", "/reset"} or text.strip() in {"新对话", "开启新对话"}:
+            self.memory.reset(chat_id)
+            self.send_card(
+                chat_id,
+                "Codex",
+                "已开启新的飞书对话。当前飞书会话上下文已清空；本机 Codex 配置、skills、共享记忆和定时任务不会受影响。",
+                reply_to=message_id,
+            )
+            return
         task = self.maybe_create_task(chat_id, text)
         if task:
             response = (
@@ -533,12 +594,18 @@ class FeishuBridge:
             reply_to=message_id,
         )
         self.memory.append(chat_id, "user", text)
+        started = time.monotonic()
         answer = self.run_codex_for_chat(chat_id, text)
+        answer_with_footer = (
+            answer
+            + "\n\n---\n"
+            + codex_footer(self.cfg.codex_home, elapsed_seconds=time.monotonic() - started, tool_count=0)
+        )
         self.memory.append(chat_id, "assistant", answer)
         if response_id:
-            self.update_card(response_id, "Codex", answer)
+            self.update_card(response_id, "Codex", answer_with_footer)
         else:
-            self.send_card(chat_id, "Codex", answer)
+            self.send_card(chat_id, "Codex", answer_with_footer)
 
     def maybe_create_task(self, chat_id: str, text: str) -> dict[str, Any] | None:
         explicit = re.match(r"^/task\s+daily\s+(\d{1,2}:\d{2})\s+(.+)$", text.strip(), re.I | re.S)
@@ -643,11 +710,21 @@ User message:
             return
         LOG.info("Running scheduled task %s", task_id)
         response_id = self.send_card(chat_id, "Codex scheduled task", "Running scheduled task...")
+        started = time.monotonic()
         answer = self.invoke_codex(prompt)
+        answer_with_footer = (
+            answer
+            + "\n\n---\n"
+            + codex_footer(
+                self.cfg.codex_home,
+                elapsed_seconds=time.monotonic() - started,
+                tool_count=0,
+            )
+        )
         if response_id:
-            self.update_card(response_id, "Codex scheduled task", answer)
+            self.update_card(response_id, "Codex scheduled task", answer_with_footer)
         else:
-            self.send_card(chat_id, "Codex scheduled task", answer)
+            self.send_card(chat_id, "Codex scheduled task", answer_with_footer)
         next_run = self.tasks.compute_next_run(task, after=now(self.cfg.timezone))
         self.tasks.update_next_run(task_id, next_run)
 

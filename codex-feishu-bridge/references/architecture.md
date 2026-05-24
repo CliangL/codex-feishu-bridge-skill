@@ -65,6 +65,8 @@ CODEX_FEISHU_CODEX_ARGS=exec --skip-git-repo-check -m gpt-5.1
 
 The template keeps lightweight Feishu memory in `conversations/`. Keep it short. Long Feishu conversations should not be replayed forever because they slow response time and waste tokens.
 
+Send `/new`, `/reset`, `新对话`, or `开启新对话` to clear only the current Feishu chat's lightweight context. This does not delete shared memory, installed skills, Codex automations, Codex auth, or model/API configuration.
+
 Use `shared-memory.md` for stable bridge instructions, such as notification routing, preferred language, or identity notes. Avoid copying whole transcripts into shared memory.
 
 ## Scheduled Tasks
