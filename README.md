@@ -11,6 +11,7 @@ This repository now packages the same bridge shape used in the local production 
 - Feishu-created scheduled tasks are mirrored into Codex automations.
 - Feishu can use a fixed model/runtime independent from desktop model switching through `/model`.
 - Notification chats can receive notification-only正文 without footer/tool/progress noise.
+- Feishu progress cards prefer model-authored public execution updates (`执行进展：...`) so the visible process reads like Codex desktop commentary; raw commands and tool details stay in the collapsed tool panel.
 
 ## Install The Skill
 
@@ -60,6 +61,7 @@ scripts/verify_codex_feishu_bridge.py --home "$HOME/.codex-feishu"
 - Scheduled task output can be routed to one Feishu chat with `CODEX_FEISHU_NOTIFY_CHAT_ID`.
 - Feishu-created tasks are mirrored into `$CODEX_HOME/automations` so Codex can see them.
 - During normal chat, progress cards show concise public execution progress while the collapsed tool panel keeps short command/tool/file-change details. Tool result bodies, JSON payloads, file contents, and raw local paths stay out of the visible progress area.
+- The default workspace includes `USER_MEMORY.md`, `CODEX_FEISHU_MEMORY.md`, and `AGENTS.md`. Put stable non-secret facts such as Home Assistant URLs, NAS aliases, jump hosts, and preferred access order in `USER_MEMORY.md` so Feishu turns can use the same local knowledge across Codex account/API/model switches.
 - Notification-only messages send only the notification body. Weather-style notifications should be concise and fixed-format rather than task reports.
 - Send `/new` or `/reset` to the bot to clear only the current Feishu chat context.
 - Send `/stop` to terminate the current running Codex turn from Feishu.

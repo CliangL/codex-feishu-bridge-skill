@@ -13,6 +13,7 @@ from typing import Iterable
 DEFAULT_HOME = Path(os.getenv("CODEX_FEISHU_HOME", Path.home() / ".codex-feishu"))
 GLOBAL_MEMORY_FILE = DEFAULT_HOME / "shared-memory.md"
 DEFAULT_WORKSPACE_MEMORY_FILES = (
+    "USER_MEMORY.md",
     "CODEX_FEISHU_MEMORY.md",
     "AGENTS.md",
 )

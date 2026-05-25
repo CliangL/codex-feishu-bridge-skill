@@ -669,10 +669,15 @@ _TECHNICAL_PROGRESS_RE = re.compile(
     r"(?i)(/bin/(?:zsh|bash|sh)|\b(?:sed|rg|grep|find|mkdir|cp|python3?|node|npm|git)\b|"
     r"/Users/|\\.codex/|\\.hermes/|apply_patch|MCP|mcp|tool|工具调用|执行命令|运行代码|"
     r"等待授权|准备修改|准备调用|准备在本机执行|本机执行命令|/Applications/|/tmp/|/var/|/opt/)"
+    r"|exit=\d+"
 )
 _STRUCTURED_BLOB_PROGRESS_RE = re.compile(
     r"(?is)(看到：\s*[\{\[]|['\"]content['\"]\s*:|['\"]type['\"]\s*:|['\"]text['\"]\s*:|"
     r"\\n|github_fetch\s*返回了结果|mcp.*返回了结果|tool.*返回了结果)"
+)
+_PUBLIC_PROGRESS_MARKER_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:执行进展|公开进展|进展|状态更新)\s*[:：]\s*(.+?)\s*$",
+    re.IGNORECASE,
 )
 _SENSITIVE_TOOL_ARG_KEY_RE = re.compile(
     r"(?i)(secret|token|password|passwd|authorization|api[_-]?key|access[_-]?key|refresh[_-]?token)"
@@ -749,11 +754,47 @@ _GENERIC_TOOL_SUMMARY_PHRASES = {
     "验证步骤已通过。",
     "文件和目录已经确认。",
     "搜索完成，相关线索已经定位。",
+    "相关文件已读到，可以继续判断和改动。",
+    "这一步没有按预期完成，我会根据反馈换一种方式继续确认。",
+    "本机改动已经落下，接下来要验证它是否真的生效。",
 }
 
 
 def strip_progress_step(text: str) -> str:
-    return _PROGRESS_STEP_RE.sub("", str(text or "").strip()).strip()
+    value = _PROGRESS_STEP_RE.sub("", str(text or "").strip()).strip()
+    match = _PUBLIC_PROGRESS_MARKER_RE.match(value)
+    if match:
+        return match.group(1).strip()
+    return value
+
+
+def extract_public_progress_notes(text: str, *, limit: int = 6) -> list[str]:
+    """Extract model-authored public progress notes.
+
+    These are not private chain-of-thought. They are explicit, user-facing
+    execution updates emitted with a marker so Feishu can display them in the
+    progress area while keeping the final answer clean.
+    """
+    notes: list[str] = []
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        match = _PUBLIC_PROGRESS_MARKER_RE.match(raw_line)
+        if not match:
+            continue
+        note = compact_public_text(match.group(1), limit=260)
+        if note and not is_low_value_progress(note):
+            notes.append(note)
+        if len(notes) >= limit:
+            break
+    return notes
+
+
+def strip_public_progress_notes(text: str) -> str:
+    kept: list[str] = []
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        if _PUBLIC_PROGRESS_MARKER_RE.match(raw_line):
+            continue
+        kept.append(raw_line)
+    return "\n".join(kept).strip()
 
 
 def is_low_value_progress(text: str) -> bool:
@@ -1018,6 +1059,87 @@ def summarize_search_output(output: Any, *, exit_code: Any = None) -> str:
     return ""
 
 
+def _command_matches_any(value: str, tokens: tuple[str, ...]) -> bool:
+    return any(token in value for token in tokens)
+
+
+def _command_topic(command: str) -> str:
+    script = shell_script_from_command(command)
+    value = str(script or command or "").lower()
+    if _command_matches_any(value, ("home assistant", "homeassistant", "hass", "hassos")):
+        return "homeassistant"
+    if _command_matches_any(value, ("卫生间", "人体", "human presence", "occupancy", "motion_sensor", "motion sensor")):
+        return "homeassistant"
+    if _command_matches_any(value, ("jump host", "jump_host", "proxyjump", "openwrt", "pve", "homenet", "home lan", "192.168.")):
+        return "home_network"
+    if _command_matches_any(value, ("user_memory.md", "codeX_feishu_memory.md".lower(), "shared-memory.md", "shared_memory.py")):
+        return "memory"
+    if _command_matches_any(value, ("agents.md", "current_task_memory.md", "current_handoff.md")):
+        return "project_context"
+    if _command_matches_any(value, ("codex_feishu_app.py", "conversation_memory.py", "tasks.py", ".codex-feishu/app")):
+        return "bridge_code"
+    if _command_matches_any(value, ("feishu.py", "single-card", "cardkit", "reasoning_text", "tool_lines")):
+        return "feishu_card"
+    if _command_matches_any(value, ("launchd", "launchctl", "com.codex.feishu")):
+        return "service"
+    if _command_matches_any(value, ("github", "git ", ".git", "origin/main", "codex-feishu-bridge-skill")):
+        return "github"
+    if _command_matches_any(value, ("skill.md", ".codex/skills", ".agents/skills")):
+        return "skill"
+    if _command_matches_any(value, ("weather", "天气", "forecast")):
+        return "weather"
+    if _command_matches_any(value, ("log", "launchd.err", "launchd.out")):
+        return "logs"
+    return ""
+
+
+def _command_public_object(command: str) -> str:
+    topic = _command_topic(command)
+    if topic == "homeassistant":
+        return "Home Assistant 和家庭传感器规则"
+    if topic == "home_network":
+        return "家庭内网跳板和设备连通性"
+    if topic == "memory":
+        return "飞书共享记忆"
+    if topic == "project_context":
+        return "当前项目交接上下文"
+    if topic == "bridge_code":
+        return "Codex-Feishu 桥接代码"
+    if topic == "feishu_card":
+        return "飞书卡片展示逻辑"
+    if topic == "service":
+        return "飞书桥接服务状态"
+    if topic == "github":
+        return "公开 skill 仓库同步状态"
+    if topic == "skill":
+        return "Codex 可见 skill"
+    if topic == "weather":
+        return "天气通知输出格式"
+    if topic == "logs":
+        return "桥接运行日志"
+    return "相关本机上下文"
+
+
+def _public_command_file_target(words: list[str], *, fallback: str = "相关文件") -> str:
+    candidates: list[str] = []
+    for word in words:
+        text = str(word or "").strip()
+        if not text or text.startswith("-"):
+            continue
+        if re.fullmatch(r"\d+(?:,\d+)?[a-z]?", text, flags=re.IGNORECASE):
+            continue
+        if any(ch in text for ch in ("/", ".")) or text.upper().endswith((".MD", ".PY", ".JSON", ".TOML", ".YAML", ".YML", ".SH")):
+            candidates.append(text)
+    return basename_list(candidates[-3:]) or fallback
+
+
+def _search_pattern(words: list[str]) -> str:
+    for word in words[1:]:
+        if not word.startswith("-"):
+            return compact_public_text(word, limit=80)
+    return ""
+
+
 def summarize_launchctl_output(output: Any) -> str:
     text = str(output or "")
     state_match = re.search(r"\bstate\s*=\s*([A-Za-z_ -]+)", text)
@@ -1107,9 +1229,41 @@ def command_start_explanation(command: str) -> tuple[str, str]:
     value = str(script or command or "").lower()
     intent = classify_command_intent(command)
     first = words[0] if words else ""
+    subject = _command_public_object(command)
     area = public_command_area(command)
+    if first in {"rg", "grep"} or " rg " in f" {value} " or " grep " in f" {value} ":
+        pattern = _search_pattern(words)
+        if _command_topic(command) == "homeassistant":
+            return intent, "我在本机记忆和可见 skill 里找 Home Assistant / HASS 接入规则，先确认应该怎么读家庭设备状态。"
+        if _command_topic(command) == "feishu_card":
+            return intent, "我在查飞书卡片展示链路，找出执行过程和工具栏分别由哪段代码生成。"
+        suffix = f"“{pattern}”" if pattern else subject
+        return intent, f"我在搜索{suffix}，目的是找到和这次任务直接相关的实现或配置。"
+    if first in {"sed", "cat"} or "sed -n" in value:
+        target = _public_command_file_target(words)
+        if _command_topic(command) == "homeassistant":
+            return intent, f"我在读取 {target} 里的 Home Assistant 接入说明，确认查询状态要走哪条稳定链路。"
+        if _command_topic(command) == "memory":
+            return intent, f"我在读取 {target}，确认飞书端每轮会带上哪些长期记忆。"
+        if _command_topic(command) == "feishu_card":
+            return intent, f"我在读取 {target}，看清楚卡片如何展示执行过程和工具调用。"
+        return intent, f"我在读取 {target}，先理解现有内容再决定下一步。"
+    if first in {"find", "ls", "stat", "wc"}:
+        return intent, f"我在盘点 {subject} 的本机文件位置，确认后续读取或修改的对象。"
+    if first == "ssh" or " ssh " in f" {value} ":
+        if _command_topic(command) in {"homeassistant", "home_network"}:
+            return intent, "我在通过已知家庭内网跳板确认链路，而不是把这台 Mac 直连失败当成结论。"
+        return intent, f"我在通过 SSH 检查 {subject}，确认远端实际状态。"
     if area:
-        return intent, _PUBLIC_COMMAND_START.get(area, "我在执行当前必要的本机步骤，拿实际结果来决定下一步。")
+        if area == "bridge_code":
+            return intent, "我在检查 Codex-Feishu 桥接实现，定位飞书端执行过程和工具栏的分流位置。"
+        if area == "logs":
+            return intent, "我在读取最新桥接日志，确认你刚才的飞书消息有没有进入本机 Codex，以及卡片更新是否正常。"
+        if area == "service":
+            return intent, "我在检查本机飞书桥接服务状态，确认新逻辑是否已经运行在当前进程里。"
+        if area == "git":
+            return intent, "我在核对 Git 状态，确认本机改动和公开 skill 仓库是否同步。"
+        return intent, _PUBLIC_COMMAND_START.get(area, f"我在检查 {subject}，拿实际结果来决定下一步。")
     if "py_compile" in value:
         files = basename_list(words[words.index("py_compile") + 1 :] if "py_compile" in words else words)
         target = f"：{files}" if files else ""
@@ -1118,20 +1272,6 @@ def command_start_explanation(command: str) -> tuple[str, str]:
         return intent, "我在检查脚本语法，先排除启动脚本层面的低级错误。"
     if "pytest" in value or "npm test" in value or "pnpm test" in value:
         return intent, "我在运行测试，用实际用例确认行为没有被改坏。"
-    if first in {"rg", "grep"} or "rg " in value or "grep " in value:
-        pattern = ""
-        for word in words[1:]:
-            if not word.startswith("-"):
-                pattern = compact_public_text(word, limit=80)
-                break
-        suffix = f"“{pattern}”" if pattern else "相关关键词"
-        return intent, f"我在搜索{suffix}，目的是找到这段行为到底由哪处代码或配置产生。"
-    if first == "find" or "find " in value or first in {"ls", "stat"}:
-        target = basename_list(words[1:]) or "相关目录"
-        return intent, f"我在盘点 {target}，确认目标文件和目录是否真的存在。"
-    if first == "sed" or "sed -n" in value or first == "cat":
-        target = basename_list(words[-2:] if len(words) > 1 else words) or "相关文件"
-        return intent, f"我在打开 {target}，先看清楚现有实现，再决定怎么改。"
     if "git diff" in value or "git status" in value:
         return intent, "我在核对本机改动状态，确认这次只改 Codex 飞书桥接，不碰无关内容。"
     if "mkdir" in value:
@@ -1160,20 +1300,21 @@ def command_complete_explanation(
     value = str(script or command or "").lower()
     intent = classify_command_intent(command)
     failed = exit_code not in (None, 0)
+    first = words[0] if words else ""
+    topic = _command_topic(command)
+    subject = _command_public_object(command)
     area = public_command_area(command)
-    if area:
+    if words and words[0] in {"rg", "grep"} or " rg " in f" {value} " or " grep " in f" {value} ":
+        pattern = _search_pattern(words)
         if failed and exit_code != 1:
-            return intent, "这一步没有按预期完成，我会根据反馈换一种方式继续确认。"
-        if area == "search" and exit_code == 1:
-            return intent, "搜索没有找到匹配项；如果是在查残留文案，说明这类残留已经清掉。"
-        return intent, _PUBLIC_COMMAND_DONE.get(area, "这一步已经完成，我继续推进后面的判断。")
-    if words and words[0] in {"rg", "grep"}:
-        clue = summarize_search_output(output, exit_code=exit_code)
-        if failed and exit_code != 1:
-            return intent, f"搜索这一步没有完成，返回 exit={exit_code}；我会换一种方式定位。"
+            return intent, f"搜索 {subject} 时没有拿到可用结果，我会换路径继续定位，不把这一步当成结论。"
         if exit_code == 1:
-            return intent, "搜索没有找到匹配项；如果是在查残留文案，说明这类残留已经清掉。"
-        return intent, "搜索结果已经回来，我会只提炼和任务有关的线索，不展开匹配原文。"
+            target = f"“{pattern}”" if pattern else subject
+            return intent, f"没有搜到 {target} 的匹配项；这说明这条线索不存在或残留已经清掉，我会继续查其它来源。"
+        clue = summarize_search_output(output, exit_code=exit_code)
+        if clue:
+            return intent, f"我已经搜到 {subject} 的线索，会从结果里提炼结论，不把匹配原文堆到主卡片里。"
+        return intent, f"{subject} 的搜索已经返回，我会据此收窄下一步检查范围。"
     if "py_compile" in value:
         if failed:
             clue = extract_output_clue(output)
@@ -1188,15 +1329,58 @@ def command_complete_explanation(
         if failed:
             return intent, "读取日志失败了，我会改用别的方式确认服务状态。"
         return intent, "日志已经读到，我会根据最新记录判断服务是否正常，不把原始日志塞进执行过程。"
+    if first in {"sed", "cat"} or "sed -n" in value:
+        target = _public_command_file_target(words)
+        if failed:
+            return intent, f"{target} 没有读到，我会换另一个本机来源继续确认 {subject}。"
+        if topic == "homeassistant":
+            return intent, f"{target} 已经读完，Home Assistant 的跳板、认证和实体查询规则可以用于后续判断。"
+        if topic == "memory":
+            return intent, f"{target} 已经读完，飞书端会加载的长期记忆范围已经确认。"
+        if topic == "feishu_card":
+            return intent, f"{target} 已经读完，执行过程和工具栏的展示分工已经确认。"
+        return intent, f"{target} 已经读完，我会把里面和当前任务有关的内容用于后续判断。"
+    if first in {"find", "ls", "stat", "wc"}:
+        if failed:
+            return intent, f"{subject} 的文件盘点没有拿到结果，我会换一个路径确认目标位置。"
+        return intent, f"{subject} 的文件位置已经确认，后续可以直接读取或修改目标文件。"
+    if area:
+        if failed and exit_code != 1:
+            if area == "service":
+                return intent, "服务状态检查没有拿到稳定结果，我会继续看日志或重启状态来确认。"
+            if area == "bridge_code":
+                return intent, "这条代码检查路径没有返回可用结果，我会换一个入口继续定位飞书展示逻辑。"
+            return intent, f"检查 {subject} 时没有拿到预期结果，我会换路径继续确认。"
+        if area == "bridge_code":
+            return intent, "桥接实现的相关位置已经确认，接下来会按这里修正飞书展示行为。"
+        if area == "logs":
+            return intent, "日志已经核对到关键位置，可以判断消息处理或卡片更新卡在哪一步。"
+        if area == "service":
+            clue = summarize_launchctl_output(output)
+            return intent, f"飞书桥接服务状态已经确认。{('看到：' + clue) if clue else '没有发现启动层面的异常。'}"
+        if area == "read":
+            target = _public_command_file_target(words)
+            return intent, f"{target} 已经读完，我会把里面和当前任务有关的规则用于后续判断。"
+        if area == "files":
+            return intent, f"{subject} 的文件位置已经确认，后续可以直接读取或修改目标文件。"
+        if area == "modify":
+            return intent, f"{subject} 的本机改动已经写入，接下来要用语法检查和服务状态验证它。"
+        return intent, _PUBLIC_COMMAND_DONE.get(area, f"{subject} 已经确认，我会继续推进后面的判断。")
+    if "ssh" in value or "jump host" in value or "proxyjump" in value:
+        if failed:
+            return intent, "这条远程连接路径没有打通，我会优先改走共享记忆里的家庭内网接入规则继续确认。"
+        if topic in {"homeassistant", "home_network"}:
+            return intent, "家庭内网链路已经返回结果，我会根据实际状态继续查 Home Assistant 或设备实体。"
+        return intent, f"{subject} 的远程检查已经返回，我会根据实际结果继续。"
     if failed:
-        return intent, f"这一步返回 exit={exit_code}，没有按预期完成；我会根据反馈调整路线。"
+        return intent, f"检查 {subject} 时没有拿到预期结果，我会换一种方式继续，而不是停在这一步。"
     if intent == "inspect":
-        return intent, "检查有结果了，我会根据拿到的线索决定下一步。"
+        return intent, f"{subject} 的检查已经有结果，我会据此决定下一步。"
     if intent == "modify":
-        return intent, "本机改动已经落下，接下来要验证它是否真的生效。"
+        return intent, f"{subject} 的本机改动已经写入，接下来要验证它是否真的生效。"
     if intent == "verify":
         return intent, "验证通过了，说明这一轮改动至少能正常加载或运行。"
-    return intent, "这一步已经完成，我继续推进后面的判断。"
+    return intent, f"{subject} 的当前步骤已经完成，我继续推进后面的判断。"
 
 
 def progress_explanation(
@@ -1330,7 +1514,12 @@ def summarize_item(notification: dict[str, Any]) -> Optional[str]:
     return None
 
 
-def summarize_public_progress(notification: dict[str, Any], *, step: int) -> Optional[str]:
+def summarize_public_progress(
+    notification: dict[str, Any],
+    *,
+    step: int,
+    progress: Optional["CardProgress"] = None,
+) -> Optional[str]:
     method = notification.get("method", "")
     if method == "turn/started":
         return None
@@ -1364,7 +1553,7 @@ def summarize_public_progress(notification: dict[str, Any], *, step: int) -> Opt
     if item_type in {"plan", "hookPrompt"}:
         return None
     if item_type == "commandExecution":
-        if started:
+        if progress is not None and progress.has_model_progress:
             return None
         return command_progress_line(
             str(item.get("command") or ""),
@@ -1404,6 +1593,9 @@ def summarize_public_progress(notification: dict[str, Any], *, step: int) -> Opt
             text=public_tool_done_text(tool_name, failed=failed),
         )
     if item_type == "agentMessage":
+        notes = extract_public_progress_notes(item.get("text") or "")
+        if notes:
+            return progress_explanation(step=step, text=notes[-1])
         return None
     return None
 
@@ -1426,6 +1618,11 @@ def summarize_reasoning(notification: dict[str, Any], *, limit: int = 1200) -> O
     if not text:
         return None
     return sanitize_thought_summary(text, limit=limit)
+
+
+def final_text_without_progress_markers(text: str) -> str:
+    cleaned = strip_public_progress_notes(text)
+    return normalize_text(cleaned) if cleaned else ""
 
 
 def parse_task_request(text: str) -> Optional[dict[str, Any]]:
@@ -1616,6 +1813,7 @@ class CardProgress:
     reasoning_keys: list[str] = field(default_factory=list)
     progress_step: int = 0
     active_item_steps: dict[str, int] = field(default_factory=dict)
+    has_model_progress: bool = False
     card_created: bool = False
     completed: bool = False
     last_error: str = ""
@@ -1693,6 +1891,10 @@ class CardProgress:
         else:
             self.last_error = str(result.error or "unknown send error")
         self.last_push_ms = current
+
+    async def push_model_progress(self, line: str, *, force: bool = True) -> None:
+        self.has_model_progress = True
+        await self.push_reasoning(line, force=force)
 
     def step_for_event(self, notification: dict[str, Any]) -> int:
         method = str(notification.get("method") or "")
@@ -2530,7 +2732,11 @@ class CodexFeishuService:
                 "飞书只是任务入口；实际执行必须使用本机当前 Codex 配置、skill 和工作区。",
                 "如果任务需要创建或安装 skill，必须写入 Codex 可见路径，例如 $CODEX_HOME/skills 或 $HOME/.agents/skills；不要创建飞书专用 skill。",
                 "如果需要新增或维护飞书通知型定时任务，必须通过 $CODEX_FEISHU_HOME/app/tasks.py 的 add/pause/resume/delete 接口维护共享任务库，不要直接手写 tasks.json。",
+                "遇到家庭设备、Home Assistant/HASS、NAS、PVE、OpenWrt、远程服务器、skill 或自动化任务问题时，先读取共享记忆和 Codex 可见 skill/脚本；不要因为默认飞书工作区没有线索就断言缺认证或不可完成。",
+                "查询用户自有家庭自动化状态时，只做只读状态读取；可以读取灯、门磁、温湿度、人体/移动/存在传感器等设备状态，但不要访问摄像头/音频，也不要监控第三方隐私。",
+                "如果 Mac 直连家庭内网服务失败，不要直接下结论；优先使用共享记忆里的家庭内网跳板、Home Assistant 接入规则或已有脚本继续验证。",
                 "这是通知型定时任务；最终回答只输出要推送给用户的通知正文，不要写执行过程、尾注、工具调用、完成情况、验证结果、来源清单或需要用户处理的事项，除非任务正文明确要求。",
+                "通知型任务不要输出“执行进展：”标记行；通知窗口只需要最终通知正文。",
                 "",
                 "## 共享本机记忆",
                 shared_context,
@@ -2746,7 +2952,8 @@ class CodexFeishuService:
                     outcome = ProcessingOutcome.FAILURE
                     final_text = f"Codex 执行失败：\n\n```text\n{normalize_text(result.error, 4000)}\n```"
                 else:
-                    final_text = result.final_text or "Codex 已完成，但没有返回正文。"
+                    cleaned_result_text = final_text_without_progress_markers(result.final_text or "")
+                    final_text = cleaned_result_text or "Codex 已完成，但没有返回正文。"
                     if result.error:
                         final_text += f"\n\n> 执行期间提示：{result.error}"
                 if active_turn.queued_messages:
@@ -2889,12 +3096,19 @@ class CodexFeishuService:
         if method not in display_methods:
             return
         step = progress.step_for_event(notification)
-        public_progress = summarize_public_progress(notification, step=step)
+        public_progress = summarize_public_progress(notification, step=step, progress=progress)
         if public_progress:
-            asyncio.run_coroutine_threadsafe(
-                progress.push_reasoning(public_progress, force=True),
-                self.loop,
-            )
+            item = (notification.get("params") or {}).get("item") or {}
+            if item.get("type") == "agentMessage":
+                asyncio.run_coroutine_threadsafe(
+                    progress.push_model_progress(public_progress, force=True),
+                    self.loop,
+                )
+            else:
+                asyncio.run_coroutine_threadsafe(
+                    progress.push_reasoning(public_progress, force=True),
+                    self.loop,
+                )
         line = summarize_item(notification)
         if line:
             asyncio.run_coroutine_threadsafe(progress.push_tool(line), self.loop)
@@ -2918,11 +3132,19 @@ class CodexFeishuService:
             "- 可在当前工作区内读取、编辑、运行测试；涉及危险命令或越权操作会通过飞书按钮请求用户确认。",
             "- 不要泄露 API key、token、密码或完整 access key。",
             "- 最终回答要简洁说明做了什么、验证结果和需要用户知道的限制。",
+            "- 执行过程中要像 Codex 桌面端一样给用户看得懂的公开执行进展。进展只写你正在查什么、为什么、发现了什么、哪条路失败后换哪条路、验证是否通过；不要写私密推理、不要写命令、代码、路径、JSON、工具结果原文。",
+            "- 公开执行进展不是标题，也不是空泛状态。要像桌面端 commentary 一样具体，例如“我先查 Home Assistant 的实体来源，再确认卫生间人体传感器的 entity_id 和当前状态”。",
+            "- 每当你开始一个新的实质步骤，或一个步骤有关键发现/失败/通过时，单独输出一行：`执行进展：...`。这行会显示在飞书卡片的执行过程区，最终正文会自动移除这些标记行。",
+            "- 在第一次调用工具之前，必须先输出一条 `执行进展：...`，说明这次准备从哪里查、为什么这么查。后续每个实质阶段最多输出 1 条关键进展，避免重复刷屏。",
+            "- 不要输出泛化空话，例如“文件和目录已确认”“相关线索已定位”“这一步没有按预期完成”。要说清楚对象和含义，例如“执行进展：我先查本机共享记忆里的 Home Assistant 入口，确认是否应该经家庭内网跳板访问”。",
             "- 你看到的是本机共享记忆层；不同 Codex 登录方式的云端 thread 不共享，但本机记忆和任务库共享。",
             "- 飞书对话采用独立轻量 agent 记忆：每轮都是新的本机 Codex turn，只带滚动摘要和最近几轮，避免长上下文拖慢和过度消耗 token。",
             "- 如果用户要求创建、安装或更新 skill，必须写入 Codex 可见路径，例如 $CODEX_HOME/skills 或 $HOME/.agents/skills；不要创建飞书专用 skill。",
             "- 如果用户通过飞书创建定时任务，要使用本机共享任务库；任务应能在 Codex automations 里被看到。",
             "- 创建、暂停、恢复或删除飞书通知型定时任务时，必须调用 $CODEX_FEISHU_HOME/app/tasks.py 的 add/pause/resume/delete 接口，不要直接手写 $CODEX_FEISHU_HOME/tasks.json；该接口会同步 Codex automations 镜像。",
+            "- 遇到家庭设备、Home Assistant/HASS、NAS、PVE、OpenWrt、远程服务器、skill 或自动化任务问题时，先读取共享记忆和 Codex 可见 skill/脚本；不要因为默认飞书工作区没有线索就断言缺认证或不可完成。",
+            "- 查询用户自有家庭自动化状态时，只做只读状态读取；可以读取灯、门磁、温湿度、人体/移动/存在传感器等设备状态，但不要访问摄像头/音频，也不要监控第三方隐私。",
+            "- 如果 Mac 直连家庭内网服务失败，不要直接下结论；优先使用共享记忆里的家庭内网跳板、Home Assistant 接入规则或已有脚本继续验证。",
             "",
             f"飞书来源：{event.source.description}",
             f"工作目录：{self.workspace}",

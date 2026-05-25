@@ -54,6 +54,13 @@ $HOME/Library/LaunchAgents/com.codex.feishu.plist
 6. Codex runs using the Feishu-side `codex-home` config plus shared local Codex auth/state, skills, MCP servers, automations, and workspace.
 7. The bridge updates that turn's card with progress, tool summaries, and the final answer.
 
+The progress area is driven first by model-authored public execution updates.
+The model emits lines such as `执行进展：我先查 Home Assistant 的实体来源，再确认卫生间人体传感器的状态`.
+The bridge displays those lines in the Feishu card and removes them from the
+final answer. Low-level command/tool/file-change events remain visible in the
+collapsed tool panel; they are only used as visible progress fallback when no
+model-authored public progress has appeared yet.
+
 If a new Feishu message arrives while a turn is still running, the bridge should classify it:
 
 - Progress or status questions: answer from the current execution state without interrupting the turn.
@@ -88,6 +95,16 @@ During a running task:
 - ordinary supplemental messages may be queued and handled after the current turn.
 
 Use `shared-memory.md` for stable bridge instructions, such as notification routing, preferred language, or identity notes. Avoid copying whole transcripts into shared memory.
+
+The default workspace also loads:
+
+- `USER_MEMORY.md`: non-secret durable user facts, infrastructure aliases, Home Assistant/NAS/server access order, and response preferences.
+- `CODEX_FEISHU_MEMORY.md`: bridge-level operating rules.
+- `AGENTS.md`: workspace rules for Feishu turns.
+
+Use these files to keep local memory stable across Codex account/API/model
+switches. They do not make different cloud Codex threads share a remote thread
+id; they provide local continuity for Feishu turns.
 
 ## Scheduled Tasks
 
