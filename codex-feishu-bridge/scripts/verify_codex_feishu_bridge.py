@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
 
     home = Path(args.home).expanduser().resolve()
     env_path = home / ".env"
-    app_path = home / "app" / "codex_feishu_bridge.py"
+    app_path = home / "app" / "codex_feishu_app.py"
     env = read_env(env_path)
     failures = 0
 
@@ -104,6 +104,18 @@ def main(argv: list[str] | None = None) -> int:
             failures += 1
         else:
             ok(f"{key} configured", "***")
+
+    runtime_src = home / "runtime" / "src"
+    if runtime_src.exists():
+        ok("runtime src exists", str(runtime_src))
+    else:
+        fail("runtime src missing", str(runtime_src)); failures += 1
+
+    feishu_codex_home = Path(env.get("CODEX_FEISHU_CODEX_HOME") or home / "codex-home")
+    if feishu_codex_home.exists():
+        ok("Feishu codex-home exists", str(feishu_codex_home))
+    else:
+        fail("Feishu codex-home missing", str(feishu_codex_home)); failures += 1
 
     codex_bin = env.get("CODEX_FEISHU_CODEX_BIN") or shutil.which("codex") or "codex"
     if shutil.which(codex_bin) or Path(codex_bin).exists():
@@ -132,9 +144,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         fail("venv python missing", str(venv_python)); failures += 1
 
+    extra_compile_targets = [
+        str(home / "app" / "conversation_memory.py"),
+        str(home / "app" / "shared_memory.py"),
+        str(home / "app" / "tasks.py"),
+    ]
     if app_path.exists() and venv_python.exists():
         proc = subprocess.run(
-            [str(venv_python), "-m", "py_compile", str(app_path)],
+            [str(venv_python), "-m", "py_compile", str(app_path), *extra_compile_targets],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -143,6 +160,12 @@ def main(argv: list[str] | None = None) -> int:
             ok("bridge app compiles")
         else:
             fail("bridge app compile failed", proc.stderr.strip()); failures += 1
+
+    feishu_model_state = home / "feishu-model.json"
+    if feishu_model_state.exists():
+        ok("Feishu model state exists", str(feishu_model_state))
+    else:
+        warn("Feishu model state missing", "it will be created after the first /model switch or startup seed")
 
     notify_chat = env.get("CODEX_FEISHU_NOTIFY_CHAT_ID", "")
     if notify_chat:

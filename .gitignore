@@ -10,3 +10,5 @@ conversations/
 tasks.json
 tasks.json.lock
 shared-memory.md
+feishu-model.json
+codex-home/

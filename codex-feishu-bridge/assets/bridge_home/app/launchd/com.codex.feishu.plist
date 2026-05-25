@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.codex.feishu</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>$HOME/.codex-feishu/app/start.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>$HOME/.codex-feishu/app</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>$HOME/.codex-feishu/logs/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>$HOME/.codex-feishu/logs/launchd.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CODEX_FEISHU_WORKSPACE</key>
+    <string>$HOME/.codex-feishu/workspace</string>
+    <key>CODEX_FEISHU_CODEX_BIN</key>
+    <string>/Applications/Codex.app/Contents/Resources/codex</string>
+    <key>CODEX_FEISHU_ENV_FILE</key>
+    <string>$HOME/.codex-feishu/.env</string>
+    <key>CODEX_FEISHU_RUNTIME_SRC</key>
+    <string>$HOME/.codex-feishu/runtime/src</string>
+    <key>CODEX_FEISHU_TASK_POLL_SECONDS</key>
+    <string>60</string>
+  </dict>
+</dict>
+</plist>
