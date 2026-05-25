@@ -47,12 +47,7 @@ DEFAULT_CODEX_BIN = os.getenv("CODEX_FEISHU_CODEX_BIN") or os.getenv("CODEX_BIN"
 DEFAULT_SHARED_CODEX_HOME = Path(os.getenv("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
 FEISHU_MODEL_CONFIG_PATH = DEFAULT_HOME / "feishu-model.json"
 FEISHU_FALLBACK_MODEL_CONFIG_PATH = DEFAULT_HOME / "feishu-fallback-models.json"
-SUPPORTED_FEISHU_MODELS: tuple[dict[str, str], ...] = (
-    {"provider": "", "name": "gpt-5.5", "reasoning": "xhigh"},
-    {"provider": "", "name": "gpt-5.4", "reasoning": "high"},
-    {"provider": "", "name": "gpt-5.4", "reasoning": "medium"},
-    {"provider": "", "name": "gpt-5.4-mini", "reasoning": "medium"},
-)
+FEISHU_PROVIDER_MODELS_CONFIG_PATH = DEFAULT_HOME / "feishu-provider-models.json"
 _FEISHU_REASONING_LEVELS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 if str(RUNTIME_SRC_DIR) not in sys.path:
@@ -316,6 +311,52 @@ def save_feishu_fallback_models(choices: list[dict[str, str]]) -> Path:
     return FEISHU_FALLBACK_MODEL_CONFIG_PATH
 
 
+def _coerce_model_catalog_entries(value: Any) -> list[dict[str, str]]:
+    raw_items = value
+    if isinstance(raw_items, dict):
+        raw_items = raw_items.get("models")
+    if not isinstance(raw_items, list):
+        return []
+    entries: list[dict[str, str]] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            model = item.strip()
+            reasoning = ""
+        elif isinstance(item, dict):
+            model = str(item.get("model") or item.get("name") or item.get("id") or "").strip()
+            reasoning = str(item.get("reasoning_effort") or item.get("reasoning") or "").strip()
+        else:
+            continue
+        if not model:
+            continue
+        entries.append({"model": model, "reasoning_effort": reasoning})
+    return entries
+
+
+def _models_from_provider_config(provider_config: dict[str, Any]) -> list[dict[str, str]]:
+    for key in ("models", "available_models", "supported_models"):
+        entries = _coerce_model_catalog_entries(provider_config.get(key))
+        if entries:
+            return entries
+    return []
+
+
+def load_feishu_provider_model_catalog() -> dict[str, list[dict[str, str]]]:
+    try:
+        data = json.loads(FEISHU_PROVIDER_MODELS_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    raw_providers = data.get("providers") if isinstance(data, dict) else data
+    if not isinstance(raw_providers, dict):
+        return {}
+    catalog: dict[str, list[dict[str, str]]] = {}
+    for provider_key, raw_value in raw_providers.items():
+        entries = _coerce_model_catalog_entries(raw_value)
+        if entries:
+            catalog[str(provider_key).strip()] = entries
+    return catalog
+
+
 def _normalize_model_provider(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
@@ -357,6 +398,10 @@ def supported_feishu_model_choices(
     config, _, _ = load_codex_config(codex_home)
     providers = configured_model_providers(codex_home)
     current_provider = str(config.get("model_provider") or "").strip()
+    current_model = str(config.get("model") or "").strip()
+    current_reasoning = str(
+        config.get("model_reasoning_effort") or config.get("reasoning_effort") or ""
+    ).strip()
     provider_ids = list(providers)
     if current_provider and current_provider not in providers:
         provider_ids.insert(0, current_provider)
@@ -365,31 +410,80 @@ def supported_feishu_model_choices(
 
     choices: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
-    for item in SUPPORTED_FEISHU_MODELS:
-        item_provider = str(item.get("provider") or "").strip()
-        target_providers = [item_provider] if item_provider else provider_ids
-        for provider_id in target_providers:
-            provider_config = providers.get(provider_id, {})
-            key = (
+    provider_catalog = load_feishu_provider_model_catalog()
+
+    def add_choice(provider_id: str, provider_config: dict[str, Any], model: str, reasoning: str) -> None:
+        model = str(model or "").strip()
+        reasoning = str(reasoning or "").strip()
+        if not model:
+            return
+        key = (provider_id, model.lower(), reasoning.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        choices.append(
+            {
+                "provider": provider_id,
+                "model_provider": provider_id,
+                "provider_label": _provider_display_name(provider_id, provider_config),
+                "model": model,
+                "reasoning_effort": reasoning,
+                "name": model,
+                "reasoning": reasoning,
+            }
+        )
+
+    for provider_id in provider_ids:
+        provider_config = providers.get(provider_id, {})
+        entries = _models_from_provider_config(provider_config)
+        if not entries:
+            entries = provider_catalog.get(provider_id, [])
+        if not entries:
+            provider_label_norm = _normalize_model_provider(
+                _provider_display_name(provider_id, provider_config)
+            )
+            for catalog_provider, catalog_entries in provider_catalog.items():
+                if catalog_provider == provider_id or _normalize_model_provider(catalog_provider) == provider_label_norm:
+                    entries = catalog_entries
+                    break
+        if not entries and provider_id == current_provider and current_model:
+            entries = [{"model": current_model, "reasoning_effort": current_reasoning}]
+        for item in entries:
+            add_choice(
                 provider_id,
-                str(item["name"]).strip().lower(),
-                str(item["reasoning"]).strip().lower(),
+                provider_config,
+                str(item.get("model") or item.get("name") or "").strip(),
+                str(item.get("reasoning_effort") or item.get("reasoning") or current_reasoning or "high").strip(),
             )
-            if key in seen:
-                continue
-            seen.add(key)
-            choices.append(
-                {
-                    "provider": provider_id,
-                    "model_provider": provider_id,
-                    "provider_label": _provider_display_name(provider_id, provider_config),
-                    "model": str(item["name"]).strip(),
-                    "reasoning_effort": str(item["reasoning"]).strip(),
-                    "name": str(item["name"]).strip(),
-                    "reasoning": str(item["reasoning"]).strip(),
-                }
-            )
+
     return choices
+
+
+def _provider_has_model_catalog(provider_id: str, provider_config: dict[str, Any]) -> bool:
+    if _models_from_provider_config(provider_config):
+        return True
+    catalog = load_feishu_provider_model_catalog()
+    if provider_id in catalog:
+        return True
+    provider_label_norm = _normalize_model_provider(_provider_display_name(provider_id, provider_config))
+    return any(_normalize_model_provider(key) == provider_label_norm for key in catalog)
+
+
+def _choice_from_freeform_model(
+    provider_id: str,
+    provider_config: dict[str, Any],
+    model: str,
+    reasoning: str,
+) -> dict[str, str]:
+    return {
+        "provider": provider_id,
+        "model_provider": provider_id,
+        "provider_label": _provider_display_name(provider_id, provider_config),
+        "model": str(model or "").strip(),
+        "reasoning_effort": str(reasoning or "").strip().lower(),
+        "name": str(model or "").strip(),
+        "reasoning": str(reasoning or "").strip().lower(),
+    }
 
 
 def _parse_feishu_model_tokens(raw_text: str) -> tuple[str, str, list[str]]:
@@ -455,23 +549,14 @@ def resolve_feishu_model_choice(
         provider_id = next(iter(providers))
     if not provider_id:
         return None, "unknown"
+    provider_config = providers.get(provider_id, {})
+    if _provider_has_model_catalog(provider_id, provider_config):
+        return None, "unknown-model-for-provider"
     if not reasoning:
         return None, "missing-reasoning"
     if reasoning.lower() not in _FEISHU_REASONING_LEVELS:
         return None, "unknown-reasoning"
-    provider_config = providers.get(provider_id, {})
-    return (
-        {
-            "provider": provider_id,
-            "model_provider": provider_id,
-            "provider_label": _provider_display_name(provider_id, provider_config),
-            "model": model,
-            "reasoning_effort": reasoning.lower(),
-            "name": model,
-            "reasoning": reasoning.lower(),
-        },
-        "",
-    )
+    return (_choice_from_freeform_model(provider_id, provider_config, model, reasoning), "")
 
 
 def format_supported_feishu_models(codex_home: Optional[str | Path] = None) -> str:
@@ -2525,6 +2610,8 @@ class CodexFeishuService:
                 prefix = "这个模型名在多个供应商/API 下都存在，请加供应商前缀。"
             elif reason == "ambiguous-reasoning":
                 prefix = "这个模型有多个思考强度，请把思考程度也写上。"
+            elif reason == "unknown-model-for-provider":
+                prefix = "这个模型不在该供应商/API 的已声明模型目录里。"
             else:
                 prefix = "未识别这个飞书模型。"
             return False, prefix + "\n\n" + self.model_help_text()
@@ -2579,7 +2666,7 @@ class CodexFeishuService:
                 "- `/fallback-model add <provider> <model> <reasoning>` 追加一个备用模型",
                 "- `/fallback-model clear` 清空备用模型列表",
                 "",
-                "说明：备用模型是通用机制，不绑定任何固定供应商；provider/model/reasoning 与 `/model` 使用同一套可选项。",
+                "说明：备用模型是通用机制，不绑定任何固定供应商；如果 provider 声明了模型目录，只能选择该 provider 目录里的模型。",
             ]
         ).strip()
 

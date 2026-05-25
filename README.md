@@ -239,13 +239,13 @@ launchctl print gui/$(id -u)/com.codex.feishu
 命令说明：
 
 - `/model`：查看飞书侧当前 provider、model、reasoning 和可选模型。
-- `/model <provider> <model> <reasoning>`：按 provider 精确切换，例如 `/model fhl gpt-5.4 high`；只要 provider 已在飞书 `codex-home` 中配置，model 可以是该 provider 支持的任意模型名。
+- `/model <provider> <model> <reasoning>`：按 provider 精确切换，例如 `/model fhl gpt-5.4 high`；如果 provider 声明了模型目录，`/model` 只会展示和允许该 provider 自己支持的模型，避免把 GPT 显示到 DeepSeek 分类下。
 - `/model <model> <reasoning>`：只有模型名在所有 provider 中不冲突时才允许省略 provider。
 - `/fallback-model`：查看飞书侧备用模型列表。
 - `/fallback-model set <provider> <model> <reasoning>`：替换备用模型列表，例如 `/fallback-model set backup-api gpt-5.4-mini medium`。
 - `/fallback-model add <provider> <model> <reasoning>`：追加一个备用模型，主模型失败后会按列表顺序尝试。
 - `/fallback-model clear`：清空备用模型列表。
-- `CODEX_FEISHU_FALLBACK_MODELS`：本地 `.env` 里的启动默认备用模型列表，支持逗号、分号或换行分隔，单项格式推荐 `provider|model|reasoning`，例如 `backup-api|gpt-5.4-mini|medium`。运行后也可以用 `/fallback-model` 命令改成任意已配置 provider 下的其他模型。
+- `CODEX_FEISHU_FALLBACK_MODELS`：本地 `.env` 里的启动默认备用模型列表，支持逗号、分号或换行分隔，单项格式推荐 `provider|model|reasoning`，例如 `backup-api|gpt-5.4-mini|medium`。运行后也可以用 `/fallback-model` 命令改成其他 provider 自己支持的模型。
 - `/task daily HH:MM ...`：创建每日任务。
 - `/task every 30m ...`：创建间隔任务。
 - `/task at YYYY-MM-DDTHH:MM ...`：创建一次性任务。
@@ -503,7 +503,7 @@ Fallback models are a generic ordered list, not a fixed provider choice. You can
 CODEX_FEISHU_FALLBACK_MODELS=provider-name|model-name|medium
 ```
 
-Use comma, semicolon, or newline separators for multiple candidates. Each item can use `provider|model|reasoning`, `provider/model/reasoning`, or the same free-form syntax accepted by `/model`. At runtime, use `/fallback-model`, `/fallback-model set <provider> <model> <reasoning>`, `/fallback-model add <provider> <model> <reasoning>`, and `/fallback-model clear` from Feishu to inspect or change the list without editing the repository.
+Use comma, semicolon, or newline separators for multiple candidates. Each item can use `provider|model|reasoning`, `provider/model/reasoning`, or the same free-form syntax accepted by `/model`. At runtime, use `/fallback-model`, `/fallback-model set <provider> <model> <reasoning>`, `/fallback-model add <provider> <model> <reasoning>`, and `/fallback-model clear` from Feishu to inspect or change the list without editing the repository. If a provider declares a model catalog, the bridge only shows and accepts models from that provider's own catalog.
 
 Local verification and task management:
 
