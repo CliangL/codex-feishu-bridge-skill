@@ -59,6 +59,8 @@ scripts/verify_codex_feishu_bridge.py --home "$HOME/.codex-feishu"
 - The bundled bridge app is sanitized, but it is not a toy example; it is meant to preserve the real local Codex-to-Feishu workflow.
 - Scheduled task output can be routed to one Feishu chat with `CODEX_FEISHU_NOTIFY_CHAT_ID`.
 - Feishu-created tasks are mirrored into `$CODEX_HOME/automations` so Codex can see them.
+- During normal chat, progress cards show concise public execution progress and keep tool details collapsed; raw command lines and local paths are filtered out of the visible progress area.
+- Notification-only messages send only the notification body. Weather-style notifications should be concise and fixed-format rather than task reports.
 - Send `/new` or `/reset` to the bot to clear only the current Feishu chat context.
 - Send `/stop` to terminate the current running Codex turn from Feishu.
 - Send `/model` to view the current Feishu model and supported models.

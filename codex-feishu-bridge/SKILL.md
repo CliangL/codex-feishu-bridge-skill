@@ -30,6 +30,8 @@ Use this skill to make Feishu a thin interface to the user's local Codex, not a 
 - When a new Feishu message arrives during an active turn, do not blindly interrupt. Distinguish between status/progress questions, explicit corrections, and ordinary supplemental messages.
 - Progress/status questions during a run should return a quick execution summary without interrupting the active turn.
 - Ordinary supplemental or unrelated mid-run messages may be queued for follow-up after the current turn finishes, instead of forcing an interrupt.
+- Feishu execution-progress cards should show public execution progress similar to Codex desktop commentary: what was checked, what was found, what passed or failed. Filter raw shell commands, local paths, code snippets, approval boilerplate, and near-duplicate filler from the visible progress area.
+- Keep tool-call details collapsed and summarized. Do not let raw command lines or repeated technical traces crowd the main card body.
 - Mirror Feishu-created scheduled jobs into `$CODEX_HOME/automations/<id>/automation.toml` with metadata marking the bridge as the authoritative Feishu runner.
 - Route scheduled/notification output to `CODEX_FEISHU_NOTIFY_CHAT_ID` when set; otherwise use the source Feishu chat.
 - Notification-only chats should receive正文 only, with no footer, tool panel, or execution-progress section.

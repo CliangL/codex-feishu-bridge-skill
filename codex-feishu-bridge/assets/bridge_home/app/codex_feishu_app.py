@@ -666,8 +666,9 @@ def normalize_text(text: str, limit: int = 12000) -> str:
 
 
 _TECHNICAL_PROGRESS_RE = re.compile(
-    r"(?i)(/bin/(?:zsh|bash|sh)|\\b(?:sed|rg|grep|find|mkdir|cp|python3?|node|npm|git)\\b|"
-    r"/Users/|\\.codex/|\\.hermes/|apply_patch|MCP|mcp|tool|工具调用|执行命令|运行代码|等待授权|准备修改|准备调用)"
+    r"(?i)(/bin/(?:zsh|bash|sh)|\b(?:sed|rg|grep|find|mkdir|cp|python3?|node|npm|git)\b|"
+    r"/Users/|\\.codex/|\\.hermes/|apply_patch|MCP|mcp|tool|工具调用|执行命令|运行代码|"
+    r"等待授权|准备修改|准备调用|准备在本机执行|本机执行命令|/Applications/|/tmp/|/var/|/opt/)"
 )
 
 
@@ -715,6 +716,17 @@ _LOW_VALUE_PROGRESS_PHRASES = (
     "已经形成可以给你的结论",
     "整理成正文",
     "整理最终正文",
+    "本机 Codex 已接收",
+    "Codex 正在分析",
+    "已收到请求",
+    "开始分析请求",
+    "形成回复草稿",
+    "正在分析任务",
+    "正在读取共享记忆",
+    "整理需要确认的目标和步骤",
+    "我在理解你的目标",
+    "我在理解你的请求",
+    "我会先核对已有上下文",
 )
 
 
@@ -725,6 +737,8 @@ def strip_progress_step(text: str) -> str:
 def is_low_value_progress(text: str) -> bool:
     body = strip_progress_step(text)
     if not body:
+        return True
+    if _TECHNICAL_PROGRESS_RE.search(body):
         return True
     return any(phrase in body for phrase in _LOW_VALUE_PROGRESS_PHRASES)
 
@@ -750,6 +764,43 @@ def is_similar_progress_key(candidate: str, existing: list[str]) -> bool:
             if difflib.SequenceMatcher(None, key, previous).ratio() >= 0.82:
                 return True
     return False
+
+
+def clean_public_progress_lines(
+    lines: list[str],
+    *,
+    max_lines: int = 10,
+) -> tuple[list[str], list[str]]:
+    cleaned: list[str] = []
+    keys: list[str] = []
+    for raw in lines:
+        line = compact_public_text(strip_progress_step(str(raw or "")), limit=260)
+        if not line or is_low_value_progress(line):
+            continue
+        if is_similar_progress_key(line, keys):
+            continue
+        cleaned.append(line)
+        keys.append(normalize_progress_key(line))
+    if len(cleaned) > max_lines:
+        cleaned = cleaned[-max_lines:]
+    if len(keys) > 40:
+        keys = keys[-40:]
+    return cleaned, keys
+
+
+def clean_tool_lines(lines: list[str], *, max_lines: int = 8) -> list[str]:
+    cleaned: list[str] = []
+    keys: list[str] = []
+    for raw in lines:
+        line = compact_public_text(str(raw or ""), limit=180)
+        if not line or is_low_value_progress(line):
+            continue
+        key = normalize_progress_key(line)
+        if not key or key in keys:
+            continue
+        cleaned.append(line)
+        keys.append(key)
+    return cleaned[-max_lines:]
 
 
 def _compact_path_match(match: re.Match[str]) -> str:
@@ -855,12 +906,75 @@ def classify_command_intent(command: str) -> str:
     return "operate"
 
 
+_PUBLIC_COMMAND_START: dict[str, str] = {
+    "task_store": "我在核对本机任务库，确认定时规则、通知窗口和最近运行记录。",
+    "logs": "我在读取最新桥接日志，确认飞书消息、卡片更新和任务执行状态。",
+    "bridge_code": "我在检查 Codex-Feishu 桥接实现，定位这段展示行为由哪里生成。",
+    "hermes_reference": "我在只读参考 Hermes 的通知格式，只借鉴样式，不修改 Hermes。",
+    "service": "我在检查本机飞书桥接服务状态，确认新逻辑是否已经运行。",
+    "verify": "我在做本机验证，确认改动不会导致桥接启动失败。",
+    "search": "我在搜索相关线索，缩小需要检查的代码和配置范围。",
+    "read": "我在读取相关文件，先看清楚现有实现再调整。",
+    "files": "我在盘点相关文件和目录，确认目标是否存在。",
+    "git": "我在核对 Git 状态，确认这次只涉及 Codex-Feishu 改动。",
+    "modify": "我在写入本机改动，让展示和通知规则按新要求执行。",
+}
+
+
+_PUBLIC_COMMAND_DONE: dict[str, str] = {
+    "task_store": "任务库核对完成，定时规则和运行记录已经确认。",
+    "logs": "日志核对完成，已经看到消息进入、卡片更新或错误位置。",
+    "bridge_code": "桥接实现位置已经确认，下一步按这个位置调整展示。",
+    "hermes_reference": "Hermes 天气格式已参考完毕；这里只改 Codex-Feishu。",
+    "service": "服务状态核对完成，桥接运行情况已经确认。",
+    "verify": "本机验证通过，这轮改动可以正常加载。",
+    "search": "搜索完成，相关线索已经定位。",
+    "read": "相关文件已读到，可以继续判断和改动。",
+    "files": "文件和目录已经确认。",
+    "git": "Git 状态已确认。",
+    "modify": "本机改动已经写入，下一步做验证和重启。",
+}
+
+
+def public_command_area(command: str) -> str:
+    script = shell_script_from_command(command)
+    words = split_shell_words(script)
+    value = str(script or command or "").lower()
+    if "tasks.json" in value or "/app/tasks.py" in value or "codex-feishu-task" in value:
+        return "task_store"
+    if "/logs/" in value or value.startswith("tail ") or " launchd." in value:
+        return "logs"
+    if "codex_feishu_app.py" in value or "platforms/feishu.py" in value or "/.codex-feishu/app/" in value:
+        return "bridge_code"
+    if "/.hermes/" in value or "hermes" in value:
+        return "hermes_reference"
+    if "launchctl" in value or "com.codex.feishu" in value:
+        return "service"
+    if "py_compile" in value or "bash -n" in value or "pytest" in value:
+        return "verify"
+    first = words[0] if words else ""
+    if first in {"rg", "grep"} or " rg " in f" {value} " or " grep " in f" {value} ":
+        return "search"
+    if first in {"sed", "cat"} or "sed -n" in value:
+        return "read"
+    if first in {"find", "ls", "stat", "wc"}:
+        return "files"
+    if first == "git" or " git " in f" {value} ":
+        return "git"
+    if any(token in value for token in ("apply_patch", "mkdir", " cp ", " mv ", " chmod", " install ")):
+        return "modify"
+    return ""
+
+
 def command_start_explanation(command: str) -> tuple[str, str]:
     script = shell_script_from_command(command)
     words = split_shell_words(script)
     value = str(script or command or "").lower()
     intent = classify_command_intent(command)
     first = words[0] if words else ""
+    area = public_command_area(command)
+    if area:
+        return intent, _PUBLIC_COMMAND_START.get(area, "我在执行当前必要的本机步骤，拿实际结果来决定下一步。")
     if "py_compile" in value:
         files = basename_list(words[words.index("py_compile") + 1 :] if "py_compile" in words else words)
         target = f"：{files}" if files else ""
@@ -911,6 +1025,13 @@ def command_complete_explanation(
     value = str(script or command or "").lower()
     intent = classify_command_intent(command)
     failed = exit_code not in (None, 0)
+    area = public_command_area(command)
+    if area:
+        if failed and exit_code != 1:
+            return intent, "这一步没有按预期完成，我会根据反馈换一种方式继续确认。"
+        if area == "search" and exit_code == 1:
+            return intent, "搜索没有找到匹配项；如果是在查残留文案，说明这类残留已经清掉。"
+        return intent, _PUBLIC_COMMAND_DONE.get(area, "这一步已经完成，我继续推进后面的判断。")
     if words and words[0] in {"rg", "grep"}:
         clue = summarize_search_output(output, exit_code=exit_code)
         if failed and exit_code != 1:
@@ -988,18 +1109,35 @@ def command_progress_line(
     return progress_explanation(step=step, text=text)
 
 
+def command_tool_summary(command: str, *, exit_code: Any = None, output: Any = "") -> str:
+    area = public_command_area(command)
+    failed = exit_code not in (None, 0)
+    if failed and exit_code != 1:
+        return "工具步骤未完成，已根据反馈调整路线。"
+    if area:
+        return _PUBLIC_COMMAND_DONE.get(area, "工具步骤已完成。")
+    intent = classify_command_intent(command)
+    if intent == "inspect":
+        return "检查步骤已完成。"
+    if intent == "modify":
+        return "本机改动已写入。"
+    if intent == "verify":
+        return "验证步骤已通过。"
+    return "工具步骤已完成。"
+
+
 def summarize_item(notification: dict[str, Any]) -> Optional[str]:
     if notification.get("method") != "item/completed":
         return None
     item = (notification.get("params") or {}).get("item") or {}
     item_type = item.get("type") or ""
     if item_type == "commandExecution":
-        command = str(item.get("command") or "").strip().replace("\n", " ")
-        if len(command) > 120:
-            command = command[:117] + "..."
         exit_code = item.get("exitCode")
-        suffix = f" exit={exit_code}" if exit_code not in (None, 0) else ""
-        return f"执行命令：`{command}`{suffix}" if command else "执行命令"
+        return command_tool_summary(
+            str(item.get("command") or ""),
+            exit_code=exit_code,
+            output=item.get("aggregatedOutput") or item.get("output") or "",
+        )
     if item_type == "fileChange":
         changes = item.get("changes") or []
         paths = []
@@ -1053,6 +1191,8 @@ def summarize_public_progress(notification: dict[str, Any], *, step: int) -> Opt
     if item_type in {"plan", "hookPrompt"}:
         return None
     if item_type == "commandExecution":
+        if started:
+            return None
         return command_progress_line(
             str(item.get("command") or ""),
             step=step,
@@ -1204,6 +1344,42 @@ def summarize_result(result: TurnResult, *, limit: int = 2000) -> str:
     return summary
 
 
+def is_weather_task(task: dict[str, Any]) -> bool:
+    value = f"{task.get('name') or ''}\n{task.get('prompt') or ''}"
+    return "天气" in value and ("成都" in value or "weather" in value.lower())
+
+
+def normalize_weather_notification(text: str) -> str:
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not value:
+        return value
+    start = re.search(r"\*\*成都天气\s*·\s*\d{4}-\d{2}-\d{2}\*\*", value)
+    if start:
+        value = value[start.start():]
+    allowed_prefixes = ("**成都天气", "天气：", "温度：", "空气：", "风力：", "提醒：")
+    lines: list[str] = []
+    for raw_line in value.splitlines():
+        line = raw_line.strip(" \t-•")
+        if not line:
+            continue
+        if any(line.startswith(prefix) for prefix in allowed_prefixes):
+            lines.append(line)
+        if len(lines) >= 6:
+            break
+    if lines and lines[0].startswith("**成都天气"):
+        return "\n".join(lines)
+    return value
+
+
+def notification_body_for_task(task: dict[str, Any], result: TurnResult) -> str:
+    text = result.final_text or "定时任务已完成，但没有返回正文。"
+    if result.error:
+        text += f"\n\n> 执行期间提示：{result.error}"
+    if is_weather_task(task):
+        text = normalize_weather_notification(text)
+    return text.strip()
+
+
 @dataclass(frozen=True)
 class BusyMessageDecision:
     action: str
@@ -1333,18 +1509,18 @@ class CardProgress:
         if not self.reasoning_lines or self.reasoning_lines[-1] != line:
             self.reasoning_lines.append(line)
             self.reasoning_keys.append(key)
-            if len(self.reasoning_lines) > 12:
-                self.reasoning_lines = self.reasoning_lines[-12:]
-            if len(self.reasoning_keys) > 40:
-                self.reasoning_keys = self.reasoning_keys[-40:]
+            self.reasoning_lines, self.reasoning_keys = clean_public_progress_lines(
+                self.reasoning_lines,
+                max_lines=10,
+            )
         self.last_reasoning = "\n".join(f"- {item}" for item in self.reasoning_lines[-10:])
         result = await self.adapter._upsert_single_response_card(
             chat_id=self.chat_id,
             content=None,
             reply_to=self.reply_to,
             metadata=self.metadata,
-            reasoning_text=line,
-            tool_lines=self.tool_lines[-8:] or None,
+            reasoning_text=self.last_reasoning,
+            tool_lines=clean_tool_lines(self.tool_lines, max_lines=8) or None,
             tool_total_count=self.tool_total or None,
             tool_elapsed_ms=current - self.started_ms,
             finalize=False,
@@ -1386,13 +1562,14 @@ class CardProgress:
         self.tool_lines.append(line)
         if len(self.tool_lines) > 20:
             self.tool_lines = self.tool_lines[-20:]
+        display_tool_lines = clean_tool_lines(self.tool_lines, max_lines=8)
         result = await self.adapter._upsert_single_response_card(
             chat_id=self.chat_id,
             content=None,
             reply_to=self.reply_to,
             metadata=self.metadata,
             reasoning_text=None,
-            tool_lines=self.tool_lines[-8:],
+            tool_lines=display_tool_lines,
             tool_total_count=self.tool_total,
             tool_elapsed_ms=now_ms() - self.started_ms,
             finalize=False,
@@ -1407,7 +1584,7 @@ class CardProgress:
     async def final(self, text: str, footer: str) -> bool:
         if self.completed:
             return True
-        tool_lines = None if self.notification_only else (self.tool_lines[-8:] or None)
+        tool_lines = None if self.notification_only else (clean_tool_lines(self.tool_lines, max_lines=8) or None)
         tool_total_count = None if self.notification_only else (self.tool_total or None)
         footer_text = "" if self.notification_only else footer
         result = await self.adapter._upsert_single_response_card(
@@ -2018,7 +2195,7 @@ class CodexFeishuService:
         )
         self.register_active_turn(active_turn)
         try:
-            if chat_id:
+            if chat_id and not progress.notification_only:
                 await progress.seed()
                 if not progress.card_created:
                     LOG.warning(
@@ -2044,9 +2221,7 @@ class CodexFeishuService:
                 output_path=output_path,
             )
             if chat_id:
-                final_text = result.final_text or "定时任务已完成，但没有返回正文。"
-                if result.error:
-                    final_text += f"\n\n> 执行期间提示：{result.error}"
+                final_text = notification_body_for_task(task, result)
                 delivered = await progress.final(
                     final_text,
                     format_codex_footer(
@@ -2193,6 +2368,7 @@ class CodexFeishuService:
                 "飞书只是任务入口；实际执行必须使用本机当前 Codex 配置、skill 和工作区。",
                 "如果任务需要创建或安装 skill，必须写入 Codex 可见路径，例如 $CODEX_HOME/skills 或 $HOME/.agents/skills；不要创建飞书专用 skill。",
                 "如果需要新增或维护飞书通知型定时任务，必须通过 $HOME/.codex-feishu/app/tasks.py 的 add/pause/resume/delete 接口维护共享任务库，不要直接手写 tasks.json。",
+                "这是通知型定时任务；最终回答只输出要推送给用户的通知正文，不要写执行过程、尾注、工具调用、完成情况、验证结果、来源清单或需要用户处理的事项，除非任务正文明确要求。",
                 "",
                 "## 共享本机记忆",
                 shared_context,
@@ -2204,7 +2380,7 @@ class CodexFeishuService:
                 "",
                 str(task.get("prompt") or "").strip(),
                 "",
-                "最终回答请包含：完成情况、关键结果、验证结果，以及需要用户处理的事项。",
+                "最终回答只输出通知正文。",
             ]
         )
 

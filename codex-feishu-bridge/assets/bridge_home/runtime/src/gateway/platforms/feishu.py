@@ -1918,6 +1918,8 @@ class FeishuAdapter(BasePlatformAdapter):
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         if not text.strip():
             return current
+        if "\n" in text and all(line.strip().startswith("- ") for line in text.splitlines() if line.strip()):
+            return text.strip()[-max_chars:]
         if not current:
             merged = text
         elif text == current or text in current:
