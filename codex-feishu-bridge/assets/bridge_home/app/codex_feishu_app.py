@@ -46,13 +46,12 @@ DEFAULT_FEISHU_CODEX_HOME = Path(
 DEFAULT_CODEX_BIN = os.getenv("CODEX_FEISHU_CODEX_BIN") or os.getenv("CODEX_BIN") or "codex"
 DEFAULT_SHARED_CODEX_HOME = Path(os.getenv("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
 FEISHU_MODEL_CONFIG_PATH = DEFAULT_HOME / "feishu-model.json"
+FEISHU_FALLBACK_MODEL_CONFIG_PATH = DEFAULT_HOME / "feishu-fallback-models.json"
 SUPPORTED_FEISHU_MODELS: tuple[dict[str, str], ...] = (
     {"provider": "", "name": "gpt-5.5", "reasoning": "xhigh"},
     {"provider": "", "name": "gpt-5.4", "reasoning": "high"},
     {"provider": "", "name": "gpt-5.4", "reasoning": "medium"},
     {"provider": "", "name": "gpt-5.4-mini", "reasoning": "medium"},
-    {"provider": "", "name": "deepseek-v4-flash", "reasoning": "medium"},
-    {"provider": "", "name": "deepseek-v4-pro", "reasoning": "high"},
 )
 _FEISHU_REASONING_LEVELS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
@@ -265,6 +264,58 @@ def save_feishu_model_prefs(model: str, reasoning_effort: str, model_provider: s
     return FEISHU_MODEL_CONFIG_PATH
 
 
+def _fallback_model_payload(choices: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
+    return {
+        "models": [
+            _model_pref_payload(
+                str(choice.get("model") or choice.get("name") or ""),
+                str(choice.get("reasoning_effort") or choice.get("reasoning") or ""),
+                str(choice.get("model_provider") or choice.get("provider") or ""),
+            )
+            for choice in choices
+        ]
+    }
+
+
+def load_feishu_fallback_model_specs() -> Optional[list[str]]:
+    try:
+        data = json.loads(FEISHU_FALLBACK_MODEL_CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return []
+    raw_models = data.get("models") if isinstance(data, dict) else data
+    if not isinstance(raw_models, list):
+        return []
+    specs: list[str] = []
+    for item in raw_models:
+        if isinstance(item, str):
+            spec = item.strip()
+        elif isinstance(item, dict):
+            provider = str(item.get("model_provider") or item.get("provider") or "").strip()
+            model = str(item.get("model") or item.get("name") or "").strip()
+            reasoning = str(item.get("reasoning_effort") or item.get("reasoning") or "").strip()
+            spec = "|".join(part for part in (provider, model, reasoning) if part)
+        else:
+            spec = ""
+        if spec:
+            specs.append(spec)
+    return specs
+
+
+def save_feishu_fallback_models(choices: list[dict[str, str]]) -> Path:
+    ensure_dir(DEFAULT_HOME)
+    FEISHU_FALLBACK_MODEL_CONFIG_PATH.write_text(
+        json.dumps(_fallback_model_payload(choices), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    try:
+        FEISHU_FALLBACK_MODEL_CONFIG_PATH.chmod(0o600)
+    except OSError:
+        pass
+    return FEISHU_FALLBACK_MODEL_CONFIG_PATH
+
+
 def _normalize_model_provider(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
@@ -399,7 +450,28 @@ def resolve_feishu_model_choice(
         if not reasoning:
             return matches[0], ""
         return None, "ambiguous-reasoning"
-    return None, "unknown"
+    provider_id = provider_filter
+    if not provider_id and len(providers) == 1:
+        provider_id = next(iter(providers))
+    if not provider_id:
+        return None, "unknown"
+    if not reasoning:
+        return None, "missing-reasoning"
+    if reasoning.lower() not in _FEISHU_REASONING_LEVELS:
+        return None, "unknown-reasoning"
+    provider_config = providers.get(provider_id, {})
+    return (
+        {
+            "provider": provider_id,
+            "model_provider": provider_id,
+            "provider_label": _provider_display_name(provider_id, provider_config),
+            "model": model,
+            "reasoning_effort": reasoning.lower(),
+            "name": model,
+            "reasoning": reasoning.lower(),
+        },
+        "",
+    )
 
 
 def format_supported_feishu_models(codex_home: Optional[str | Path] = None) -> str:
@@ -831,6 +903,16 @@ def parse_model_command(text: str) -> Optional[str]:
     if not raw:
         return None
     match = re.match(r"(?is)^/model(?:\s+(.*))?$", raw)
+    if not match:
+        return None
+    return (match.group(1) or "").strip()
+
+
+def parse_fallback_model_command(text: str) -> Optional[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    match = re.match(r"(?is)^/(?:fallback-model|fallback|backup-model)(?:\s+(.*))?$", raw)
     if not match:
         return None
     return (match.group(1) or "").strip()
@@ -2427,6 +2509,10 @@ class CodexFeishuService:
                 "- `/model fhl gpt-5.4 high` 按供应商/API 精确切换",
                 "- `/model gpt-5.4 high` 只有一个供应商匹配时可省略供应商",
                 "- 以后多个供应商有同名模型时，请加供应商前缀",
+                "- `/fallback-model` 查看备用模型",
+                "- `/fallback-model set <provider> <model> <reasoning>` 设置备用模型列表",
+                "- `/fallback-model add <provider> <model> <reasoning>` 追加备用模型",
+                "- `/fallback-model clear` 清空备用模型",
                 "",
                 self.fallback_model_help_text(),
             ]
@@ -2460,10 +2546,14 @@ class CodexFeishuService:
         ).strip()
 
     def fallback_model_choices(self) -> list[dict[str, str]]:
-        raw = (
-            os.getenv("CODEX_FEISHU_FALLBACK_MODELS", "").strip()
-            or os.getenv("CODEX_FEISHU_FALLBACK_MODEL", "").strip()
-        )
+        specs = load_feishu_fallback_model_specs()
+        if specs is None:
+            raw = (
+                os.getenv("CODEX_FEISHU_FALLBACK_MODELS", "").strip()
+                or os.getenv("CODEX_FEISHU_FALLBACK_MODEL", "").strip()
+            )
+        else:
+            raw = "\n".join(specs)
         choices = parse_feishu_fallback_model_choices(raw, codex_home=self.codex_home)
         current = _model_choice_identity(_current_model_choice(self.codex_home))
         return [choice for choice in choices if _model_choice_identity(choice) != current]
@@ -2477,6 +2567,76 @@ class CodexFeishuService:
             provider_label = choice.get("provider_label") or choice.get("model_provider") or "default"
             lines.append(f"- {provider_label} / {choice['model']} {choice['reasoning_effort']}")
         return "\n".join(lines)
+
+    def fallback_model_command_help_text(self) -> str:
+        return "\n".join(
+            [
+                self.fallback_model_help_text(),
+                "",
+                "用法：",
+                "- `/fallback-model` 查看当前备用模型列表",
+                "- `/fallback-model set <provider> <model> <reasoning>` 替换备用模型列表",
+                "- `/fallback-model add <provider> <model> <reasoning>` 追加一个备用模型",
+                "- `/fallback-model clear` 清空备用模型列表",
+                "",
+                "说明：备用模型是通用机制，不绑定任何固定供应商；provider/model/reasoning 与 `/model` 使用同一套可选项。",
+            ]
+        ).strip()
+
+    def update_fallback_models(self, raw_command: str) -> tuple[bool, str]:
+        command = str(raw_command or "").strip()
+        if not command or command.lower() in {"list", "show", "status", "状态", "查看"}:
+            return True, self.fallback_model_command_help_text()
+
+        head, _, tail = command.partition(" ")
+        action = head.strip().lower()
+        if action in {"clear", "off", "disable", "none", "关闭", "清空"}:
+            path = save_feishu_fallback_models([])
+            return True, "\n".join(
+                [
+                    "已清空飞书备用模型列表。",
+                    "之后主模型失败时不会自动切换到备用模型。",
+                    f"配置已写入：`{path}`",
+                ]
+            )
+
+        if action not in {"set", "add", "设置", "追加"}:
+            tail = command
+            action = "set"
+        if not tail.strip():
+            return False, "缺少备用模型参数。\n\n" + self.fallback_model_command_help_text()
+
+        parsed = parse_feishu_fallback_model_choices(tail, codex_home=self.codex_home)
+        if not parsed:
+            return False, "未识别这个备用模型。\n\n" + self.model_help_text()
+
+        if action in {"add", "追加"}:
+            choices = self.fallback_model_choices() + parsed
+        else:
+            choices = parsed
+
+        deduped: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        current = _model_choice_identity(_current_model_choice(self.codex_home))
+        for choice in choices:
+            identity = _model_choice_identity(choice)
+            if identity == current or identity in seen:
+                continue
+            seen.add(identity)
+            deduped.append(choice)
+
+        path = save_feishu_fallback_models(deduped)
+        self._runtime_signature = None
+        return True, "\n".join(
+            [
+                "已更新飞书备用模型列表。",
+                "",
+                self.fallback_model_help_text(),
+                "",
+                "说明：这只影响飞书机器人链路，不影响桌面 Codex 当前模型。",
+                f"配置已写入：`{path}`",
+            ]
+        ).strip()
 
     def apply_model_choice(self, choice: dict[str, str]) -> str:
         config_path = write_feishu_model_into_config(
@@ -3072,6 +3232,7 @@ class CodexFeishuService:
         session_key = self.session_key_for(event)
         command_text = event.text.strip().lower()
         model_command_arg = parse_model_command(event.text)
+        fallback_model_command_arg = parse_fallback_model_command(event.text)
         if command_text in {"/stop", "stop", "停止", "终止", "中止"}:
             await self.adapter.on_processing_start(event)
             outcome = ProcessingOutcome.SUCCESS
@@ -3122,6 +3283,28 @@ class CodexFeishuService:
             except Exception:
                 outcome = ProcessingOutcome.FAILURE
                 LOG.exception("model command failed")
+                raise
+            finally:
+                await self.adapter.on_processing_complete(event, outcome)
+        if fallback_model_command_arg is not None:
+            await self.adapter.on_processing_start(event)
+            outcome = ProcessingOutcome.SUCCESS
+            progress = CardProgress(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                session_key=f"{session_key}:fallback-model:{reply_to or now_ms()}",
+                card_key=f"{session_key}:fallback-model:{reply_to or now_ms()}",
+                adapter=self.adapter,
+                prompt=event.text,
+            )
+            try:
+                await progress.seed()
+                ok, message = self.update_fallback_models(fallback_model_command_arg)
+                await progress.final(message, "飞书备用模型已更新" if ok else "飞书备用模型设置失败")
+                return
+            except Exception:
+                outcome = ProcessingOutcome.FAILURE
+                LOG.exception("fallback model command failed")
                 raise
             finally:
                 await self.adapter.on_processing_complete(event, outcome)
