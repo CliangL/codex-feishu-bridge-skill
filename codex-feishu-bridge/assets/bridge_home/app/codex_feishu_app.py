@@ -322,14 +322,19 @@ def _coerce_model_catalog_entries(value: Any) -> list[dict[str, str]]:
         if isinstance(item, str):
             model = item.strip()
             reasoning = ""
+            supports_reasoning = None
         elif isinstance(item, dict):
             model = str(item.get("model") or item.get("name") or item.get("id") or "").strip()
             reasoning = str(item.get("reasoning_effort") or item.get("reasoning") or "").strip()
+            supports_reasoning = item.get("supports_reasoning")
         else:
             continue
         if not model:
             continue
-        entries.append({"model": model, "reasoning_effort": reasoning})
+        entry = {"model": model, "reasoning_effort": reasoning}
+        if supports_reasoning is not None:
+            entry["supports_reasoning"] = str(bool(supports_reasoning)).lower()
+        entries.append(entry)
     return entries
 
 
@@ -409,15 +414,21 @@ def supported_feishu_model_choices(
         provider_ids = [""]
 
     choices: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str]] = set()
     provider_catalog = load_feishu_provider_model_catalog()
 
-    def add_choice(provider_id: str, provider_config: dict[str, Any], model: str, reasoning: str) -> None:
+    def add_choice(
+        provider_id: str,
+        provider_config: dict[str, Any],
+        model: str,
+        reasoning: str,
+        supports_reasoning: Optional[bool] = None,
+    ) -> None:
         model = str(model or "").strip()
         reasoning = str(reasoning or "").strip()
         if not model:
             return
-        key = (provider_id, model.lower(), reasoning.lower())
+        key = (provider_id, model.lower())
         if key in seen:
             return
         seen.add(key)
@@ -430,6 +441,7 @@ def supported_feishu_model_choices(
                 "reasoning_effort": reasoning,
                 "name": model,
                 "reasoning": reasoning,
+                "supports_reasoning": "" if supports_reasoning is None else str(bool(supports_reasoning)).lower(),
             }
         )
 
@@ -449,11 +461,19 @@ def supported_feishu_model_choices(
         if not entries and provider_id == current_provider and current_model:
             entries = [{"model": current_model, "reasoning_effort": current_reasoning}]
         for item in entries:
+            raw_supports_reasoning = item.get("supports_reasoning")
+            if raw_supports_reasoning == "true":
+                supports_reasoning: Optional[bool] = True
+            elif raw_supports_reasoning == "false":
+                supports_reasoning = False
+            else:
+                supports_reasoning = None
             add_choice(
                 provider_id,
                 provider_config,
                 str(item.get("model") or item.get("name") or "").strip(),
                 str(item.get("reasoning_effort") or item.get("reasoning") or current_reasoning or "high").strip(),
+                supports_reasoning,
             )
 
     return choices
@@ -486,6 +506,24 @@ def _choice_from_freeform_model(
     }
 
 
+def _choice_with_reasoning(
+    choice: dict[str, str],
+    reasoning: str,
+) -> dict[str, str]:
+    updated = dict(choice)
+    if str(updated.get("supports_reasoning") or "").strip().lower() == "false":
+        updated["reasoning_effort"] = ""
+        updated["reasoning"] = ""
+        return updated
+    updated["reasoning_effort"] = str(reasoning or "").strip()
+    updated["reasoning"] = str(reasoning or "").strip()
+    return updated
+
+
+def _choice_supports_reasoning(choice: dict[str, str]) -> bool:
+    return str(choice.get("supports_reasoning") or "").strip().lower() != "false"
+
+
 def _parse_feishu_model_tokens(raw_text: str) -> tuple[str, str, list[str]]:
     text = str(raw_text or "").strip()
     if not text:
@@ -511,9 +549,14 @@ def resolve_feishu_model_choice(
     *,
     codex_home: Optional[str | Path] = None,
 ) -> tuple[Optional[dict[str, str]], str]:
+    config, _, _ = load_codex_config(codex_home)
+    current_reasoning = str(
+        config.get("model_reasoning_effort") or config.get("reasoning_effort") or ""
+    ).strip() or "high"
     model, reasoning, model_tokens = _parse_feishu_model_tokens(raw_text)
     if not model:
         return None, "empty"
+    effective_reasoning = reasoning or current_reasoning
 
     providers = configured_model_providers(codex_home)
     provider_filter = ""
@@ -531,19 +574,15 @@ def resolve_feishu_model_choice(
             continue
         if item["model"].strip().lower() != model.lower():
             continue
-        if reasoning and item["reasoning_effort"].strip().lower() != reasoning.lower():
-            continue
         matches.append(item)
 
     if len(matches) == 1:
-        return matches[0], ""
+        return _choice_with_reasoning(matches[0], effective_reasoning), ""
     if len(matches) > 1:
         providers_seen = {item["model_provider"] for item in matches}
         if len(providers_seen) > 1 and not provider_filter:
             return None, "ambiguous-provider"
-        if not reasoning:
-            return matches[0], ""
-        return None, "ambiguous-reasoning"
+        return _choice_with_reasoning(matches[0], effective_reasoning), ""
     provider_id = provider_filter
     if not provider_id and len(providers) == 1:
         provider_id = next(iter(providers))
@@ -552,18 +591,16 @@ def resolve_feishu_model_choice(
     provider_config = providers.get(provider_id, {})
     if _provider_has_model_catalog(provider_id, provider_config):
         return None, "unknown-model-for-provider"
-    if not reasoning:
-        return None, "missing-reasoning"
-    if reasoning.lower() not in _FEISHU_REASONING_LEVELS:
+    if effective_reasoning.lower() not in _FEISHU_REASONING_LEVELS:
         return None, "unknown-reasoning"
-    return (_choice_from_freeform_model(provider_id, provider_config, model, reasoning), "")
+    return (_choice_from_freeform_model(provider_id, provider_config, model, effective_reasoning), "")
 
 
 def format_supported_feishu_models(codex_home: Optional[str | Path] = None) -> str:
     grouped: dict[str, list[str]] = {}
     for item in supported_feishu_model_choices(codex_home):
         provider = item["provider_label"]
-        grouped.setdefault(provider, []).append(f"{item['model']} {item['reasoning_effort']}".strip())
+        grouped.setdefault(provider, []).append(str(item["model"]).strip())
     lines: list[str] = []
     for provider in sorted(grouped):
         values = sorted(set(grouped[provider]))
@@ -674,8 +711,11 @@ def write_feishu_model_into_config(
         if stripped.startswith("model ="):
             lines[idx] = f'model = "{model}"'
             rewritten = True
-        elif stripped.startswith("model_reasoning_effort ="):
+        elif stripped.startswith("model_reasoning_effort =") and reasoning_effort:
             lines[idx] = f'model_reasoning_effort = "{reasoning_effort}"'
+            inserted_reasoning = True
+        elif stripped.startswith("model_reasoning_effort =") and not reasoning_effort:
+            lines[idx] = ""
             inserted_reasoning = True
         elif stripped.startswith("model_provider =") and model_provider:
             lines[idx] = f'model_provider = "{model_provider}"'
@@ -684,9 +724,10 @@ def write_feishu_model_into_config(
         lines.insert(0, f'model = "{model}"')
     if model_provider and not rewritten_provider:
         lines.insert(0, f'model_provider = "{model_provider}"')
-    if not inserted_reasoning:
+    if reasoning_effort and not inserted_reasoning:
         insert_at = 2 if model_provider and len(lines) >= 2 else 1 if lines else 0
         lines.insert(insert_at, f'model_reasoning_effort = "{reasoning_effort}"')
+    lines = [line for line in lines if line.strip()]
     target_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     try:
         target_path.chmod(0o600)
@@ -2591,8 +2632,9 @@ class CodexFeishuService:
                 "",
                 "用法：",
                 "- `/model` 查看当前模型",
-                "- `/model fhl gpt-5.4 high` 按供应商/API 精确切换",
-                "- `/model gpt-5.4 high` 只有一个供应商匹配时可省略供应商",
+                "- `/model fhl gpt-5.4` 只切换模型，保留当前思考程度",
+                "- `/model fhl gpt-5.4 high` 同时切换模型和思考程度",
+                "- `/model gpt-5.4` 只有一个供应商匹配时可省略供应商",
                 "- 以后多个供应商有同名模型时，请加供应商前缀",
                 "- `/fallback-model` 查看备用模型",
                 "- `/fallback-model set <provider> <model> <reasoning>` 设置备用模型列表",
@@ -2625,7 +2667,8 @@ class CodexFeishuService:
         provider_label = choice.get("provider_label") or choice.get("model_provider") or "default"
         return True, "\n".join(
             [
-                f"已切换飞书模型到：{provider_label} / {choice['model']} {choice['reasoning_effort']}",
+                f"已切换飞书模型到：{provider_label} / {choice['model']}"
+                + (f" {choice['reasoning_effort']}" if choice.get("reasoning_effort") else ""),
                 "",
                 "说明：这只影响飞书机器人链路，不影响桌面 Codex 当前模型。",
                 f"配置已写入：`{config_path}`",
@@ -2652,7 +2695,8 @@ class CodexFeishuService:
         lines = ["备用模型："]
         for choice in choices:
             provider_label = choice.get("provider_label") or choice.get("model_provider") or "default"
-            lines.append(f"- {provider_label} / {choice['model']} {choice['reasoning_effort']}")
+            suffix = f" {choice['reasoning_effort']}" if choice.get("reasoning_effort") else ""
+            lines.append(f"- {provider_label} / {choice['model']}{suffix}")
         return "\n".join(lines)
 
     def fallback_model_command_help_text(self) -> str:
@@ -2767,7 +2811,9 @@ class CodexFeishuService:
                 choice.get("reasoning_effort") or "<default>",
             )
             await progress.push_reasoning(
-                f"主模型返回可切换错误，准备改用备用模型 {provider_label} / {choice['model']} {choice['reasoning_effort']} 重试本轮任务。",
+                f"主模型返回可切换错误，准备改用备用模型 {provider_label} / {choice['model']}"
+                + (f" {choice['reasoning_effort']}" if choice.get("reasoning_effort") else "")
+                + " 重试本轮任务。",
                 force=True,
             )
             self.apply_model_choice(choice)

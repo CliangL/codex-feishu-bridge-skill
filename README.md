@@ -44,7 +44,7 @@ This skill turns Feishu / Lark into a messaging front end for your local Codex r
 ```text
 帮我检查今天的日程和未完成任务
 /model
-/model fhl gpt-5.4 high
+/model fhl gpt-5.4
 /task daily 08:30 整理今天日程和待办
 /task every 30m 检查下载状态
 /task weekly mon,wed@08:30 生成项目周报
@@ -59,7 +59,7 @@ This skill turns Feishu / Lark into a messaging front end for your local Codex r
 - **过程不刷屏**：工具调用、命令、文件改动等细节保留在折叠面板里，默认不挤占正文。
 - **可读的执行进展**：bridge 优先展示模型主动写出的 `执行进展：...`，看起来接近 Codex Desktop 的 commentary，而不是暴露原始命令日志。
 - **本机能力可用**：Codex 仍能使用本机 skills、MCP、文件、项目目录、记忆、自动化。
-- **飞书模型可独立切换**：`/model` 查看飞书侧当前 provider / model / reasoning；`/model <provider> <model> <reasoning>` 精确切换，不必跟桌面 Codex 同步。
+- **飞书模型可独立切换**：`/model` 查看飞书侧当前 provider / model / reasoning；`/model <provider> <model>` 只切模型并保留当前 reasoning，`/model <provider> <model> <reasoning>` 才同时调整思考程度。
 - **支持通用备用模型**：可用 `.env` 或 `/fallback-model` 配置任意已接入 provider 的备用模型列表；主模型遇到余额不足、额度、限流、上游 5xx、超时等可切换错误时，会按列表顺序重试本轮任务。
 - **轻量会话记忆**：飞书对话只保留滚动摘要和最近几轮，避免长历史不断膨胀。
 - **共享本地记忆**：`USER_MEMORY.md`、`CODEX_FEISHU_MEMORY.md`、`AGENTS.md` 可放稳定的非密钥上下文，例如 NAS 别名、Home Assistant 地址、偏好规则。
@@ -222,8 +222,8 @@ launchctl print gui/$(id -u)/com.codex.feishu
 
 ```text
 /model
-/model fhl gpt-5.4 high
-/model gpt-5.4 high
+/model fhl gpt-5.4
+/model gpt-5.4 medium
 /fallback-model
 /fallback-model set backup-api gpt-5.4-mini medium
 /fallback-model add another-api model-name low
@@ -239,13 +239,16 @@ launchctl print gui/$(id -u)/com.codex.feishu
 命令说明：
 
 - `/model`：查看飞书侧当前 provider、model、reasoning 和可选模型。
-- `/model <provider> <model> <reasoning>`：按 provider 精确切换，例如 `/model fhl gpt-5.4 high`；如果 provider 声明了模型目录，`/model` 只会展示和允许该 provider 自己支持的模型，避免把 GPT 显示到 DeepSeek 分类下。
-- `/model <model> <reasoning>`：只有模型名在所有 provider 中不冲突时才允许省略 provider。
+- `/model <provider> <model>`：只切换模型，保留当前 reasoning，例如 `/model fhl gpt-5.4`。
+- `/model <provider> <model> <reasoning>`：同时切换模型和 reasoning，例如 `/model fhl gpt-5.4 medium`。
+- `/model <model>`：只有模型名在所有 provider 中不冲突时才允许省略 provider。
+- `/model` 列表只显示各 provider 自己支持的模型名；如果 provider 声明了模型目录，会避免把 GPT 显示到 DeepSeek 分类下。
 - `/fallback-model`：查看飞书侧备用模型列表。
 - `/fallback-model set <provider> <model> <reasoning>`：替换备用模型列表，例如 `/fallback-model set backup-api gpt-5.4-mini medium`。
 - `/fallback-model add <provider> <model> <reasoning>`：追加一个备用模型，主模型失败后会按列表顺序尝试。
 - `/fallback-model clear`：清空备用模型列表。
 - `CODEX_FEISHU_FALLBACK_MODELS`：本地 `.env` 里的启动默认备用模型列表，支持逗号、分号或换行分隔，单项格式推荐 `provider|model|reasoning`，例如 `backup-api|gpt-5.4-mini|medium`。运行后也可以用 `/fallback-model` 命令改成其他 provider 自己支持的模型。
+- 模型目录可声明 `supports_reasoning=false`；这类模型切换和回退时只写 provider/model，不会继承或写入 Codex reasoning 字段。
 - `/task daily HH:MM ...`：创建每日任务。
 - `/task every 30m ...`：创建间隔任务。
 - `/task at YYYY-MM-DDTHH:MM ...`：创建一次性任务。
@@ -386,7 +389,7 @@ In Feishu, you can talk to the bot like a remote Codex window:
 ```text
 Check my agenda and unfinished tasks for today
 /model
-/model fhl gpt-5.4 high
+/model fhl gpt-5.4
 /task daily 08:30 summarize today's agenda and todos
 /task every 30m check download status
 /task weekly mon,wed@08:30 create a project report
@@ -482,8 +485,9 @@ Feishu chat commands:
 
 ```text
 /model
+/model <provider> <model>
 /model <provider> <model> <reasoning>
-/model <model> <reasoning>
+/model <model>
 /fallback-model
 /fallback-model set <provider> <model> <reasoning>
 /fallback-model add <provider> <model> <reasoning>
@@ -503,7 +507,7 @@ Fallback models are a generic ordered list, not a fixed provider choice. You can
 CODEX_FEISHU_FALLBACK_MODELS=provider-name|model-name|medium
 ```
 
-Use comma, semicolon, or newline separators for multiple candidates. Each item can use `provider|model|reasoning`, `provider/model/reasoning`, or the same free-form syntax accepted by `/model`. At runtime, use `/fallback-model`, `/fallback-model set <provider> <model> <reasoning>`, `/fallback-model add <provider> <model> <reasoning>`, and `/fallback-model clear` from Feishu to inspect or change the list without editing the repository. If a provider declares a model catalog, the bridge only shows and accepts models from that provider's own catalog.
+Use comma, semicolon, or newline separators for multiple candidates. Each item can use `provider|model|reasoning`, `provider/model/reasoning`, or the same free-form syntax accepted by `/model`. At runtime, use `/fallback-model`, `/fallback-model set <provider> <model> <reasoning>`, `/fallback-model add <provider> <model> <reasoning>`, and `/fallback-model clear` from Feishu to inspect or change the list without editing the repository. If a provider declares a model catalog, the bridge only shows and accepts models from that provider's own catalog. Catalog entries may set `supports_reasoning=false`; those models are selected by name only and do not inherit the current Codex reasoning field.
 
 Local verification and task management:
 
