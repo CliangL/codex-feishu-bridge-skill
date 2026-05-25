@@ -9,7 +9,7 @@ This repository now packages the same bridge shape used in the local production 
 - Feishu talks to the local Codex app-server bridge, not a separate cloud AI.
 - Feishu keeps a lightweight conversation memory layer, but shares the user's local Codex memory, skills, and automations.
 - Feishu-created scheduled tasks are mirrored into Codex automations.
-- Feishu can use a fixed model/runtime independent from desktop model switching through `/model`.
+- Feishu can use a fixed provider/API profile and model independent from desktop model switching through `/model`.
 - Notification chats can receive notification-only正文 without footer/tool/progress noise.
 - Feishu progress cards prefer model-authored public execution updates (`执行进展：...`) so the visible process reads like Codex desktop commentary; raw commands and tool details stay in the collapsed tool panel.
 
@@ -65,8 +65,9 @@ scripts/verify_codex_feishu_bridge.py --home "$HOME/.codex-feishu"
 - Notification-only messages send only the notification body. Weather-style notifications should be concise and fixed-format rather than task reports.
 - Send `/new` or `/reset` to the bot to clear only the current Feishu chat context.
 - Send `/stop` to terminate the current running Codex turn from Feishu.
-- Send `/model` to view the current Feishu model and supported models.
-- Send `/model <name>` to switch the Feishu-side model without affecting the desktop Codex model.
+- Send `/model` to view the current Feishu provider/API profile and supported models.
+- Send `/model <provider> <model> <reasoning>` to switch precisely, for example `/model fhl gpt-5.4 high`.
+- Send `/model <model> <reasoning>` only when that model is unambiguous across providers; if two providers expose the same model name, the bridge asks for the provider prefix instead of guessing.
 - Mid-run follow-up messages are classified: progress questions reply immediately without interrupting, clear corrections interrupt, and ordinary supplemental messages are queued for the next turn.
 - The scheduler is timer-based; the wake window is only a resilience bound.
 - No user credentials, chat IDs, logs, conversations, or task stores are included in this repository.

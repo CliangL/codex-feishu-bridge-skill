@@ -97,8 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         fail(".env missing", str(env_path)); failures += 1
 
-    for key in ("FEISHU_APP_ID", "FEISHU_APP_SECRET"):
-        value = env.get(key, "")
+    for key in ("CODEX_FEISHU_APP_ID", "CODEX_FEISHU_APP_SECRET"):
+        legacy_key = key.removeprefix("CODEX_")
+        value = env.get(key, "") or env.get(legacy_key, "")
         if value in PLACEHOLDERS:
             fail(f"{key} not configured")
             failures += 1

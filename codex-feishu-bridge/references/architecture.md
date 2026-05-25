@@ -74,9 +74,10 @@ Do not store provider credentials in bridge code. Let Codex own login state:
 - ChatGPT login, API login, or custom provider config lives under `$CODEX_HOME`.
 - The bridge keeps a Feishu-specific `codex-home` under `$HOME/.codex-feishu/codex-home`.
 - That Feishu `codex-home` links back to the main local Codex auth/global state and shared directories, so account/API switching, skills, memories, sessions, plugins, and automations continue to be shared.
-- Desktop model switching does not have to affect Feishu. The bridge can keep its own model in `codex-home/config.toml` and `feishu-model.json`.
-- `/model` shows the current Feishu model and supported options.
-- `/model <name>` updates only the Feishu-side model/runtime, not the desktop Codex model.
+- Desktop model switching does not have to affect Feishu. The bridge can keep its own provider/API profile, model, and reasoning effort in `codex-home/config.toml` and `feishu-model.json`.
+- `/model` shows the current Feishu provider/API profile, model, and supported options grouped by provider.
+- `/model <provider> <model> <reasoning>` updates only the Feishu-side provider/model/runtime, not the desktop Codex model.
+- `/model <model> <reasoning>` is allowed only when the model is unambiguous across configured providers. If two providers expose the same model name, require a provider prefix such as `fhl`.
 
 If a deployment wants a fixed default Feishu model, seed it into the Feishu-side `codex-home/config.toml` during install and keep `/model` available for later switching.
 

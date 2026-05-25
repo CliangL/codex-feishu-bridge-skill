@@ -8,7 +8,7 @@
 - The bridge may use a Feishu-specific `codex-home` for model selection while sharing local Codex auth/global state, skills, memories, sessions, plugins, and automations from the main `$CODEX_HOME`.
 - Use `/new` or `/reset` to clear only the Feishu chat's lightweight context. Shared memory, installed skills, automations, and Codex login/API configuration remain intact.
 - Use `/stop` to terminate the currently running local Codex turn from Feishu.
-- Use `/model` and `/model <name>` to inspect or change the Feishu-side model without changing the desktop Codex model.
+- Use `/model` and `/model <provider> <model> <reasoning>` to inspect or change the Feishu-side provider/API profile and model without changing the desktop Codex model.
 
 ## Public Execution Progress
 

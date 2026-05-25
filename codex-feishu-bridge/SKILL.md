@@ -26,7 +26,7 @@ Use this skill to make Feishu a thin interface to the user's local Codex, not a 
 - The published install should preserve cross-login sharing for local memory, skills, and scheduled task visibility even though different Codex cloud threads do not share a real remote thread id.
 - Create a fresh Feishu response card/message for every inbound user turn. Updating that per-turn card is fine; reusing one global card for all turns is not.
 - Support `/stop` so a Feishu user can terminate the currently running local Codex turn.
-- Support `/model` and `/model <name>` so Feishu can inspect and switch its own model independently from desktop Codex.
+- Support `/model` and `/model <provider> <model> <reasoning>` so Feishu can inspect and switch its own provider/API profile and model independently from desktop Codex. If multiple providers expose the same model name, require the provider prefix instead of guessing.
 - When a new Feishu message arrives during an active turn, do not blindly interrupt. Distinguish between status/progress questions, explicit corrections, and ordinary supplemental messages.
 - Progress/status questions during a run should return a quick execution summary without interrupting the active turn.
 - Ordinary supplemental or unrelated mid-run messages may be queued for follow-up after the current turn finishes, instead of forcing an interrupt.

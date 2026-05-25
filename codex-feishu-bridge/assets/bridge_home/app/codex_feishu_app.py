@@ -47,16 +47,12 @@ DEFAULT_CODEX_BIN = os.getenv("CODEX_FEISHU_CODEX_BIN") or os.getenv("CODEX_BIN"
 DEFAULT_SHARED_CODEX_HOME = Path(os.getenv("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
 FEISHU_MODEL_CONFIG_PATH = DEFAULT_HOME / "feishu-model.json"
 SUPPORTED_FEISHU_MODELS: tuple[dict[str, str], ...] = (
-    {"name": "gpt-5.5", "reasoning": "xhigh"},
-    {"name": "gpt-5.4", "reasoning": "high"},
-    {"name": "gpt-5.4", "reasoning": "medium"},
-    {"name": "gpt-5.4-mini", "reasoning": "medium"},
+    {"provider": "", "name": "gpt-5.5", "reasoning": "xhigh"},
+    {"provider": "", "name": "gpt-5.4", "reasoning": "high"},
+    {"provider": "", "name": "gpt-5.4", "reasoning": "medium"},
+    {"provider": "", "name": "gpt-5.4-mini", "reasoning": "medium"},
 )
-_SUPPORTED_FEISHU_MODEL_KEYS = {
-    f'{item["name"].strip().lower()}::{item["reasoning"].strip().lower()}': item
-    for item in SUPPORTED_FEISHU_MODELS
-}
-_SUPPORTED_FEISHU_MODEL_NAMES = {item["name"].strip().lower() for item in SUPPORTED_FEISHU_MODELS}
+_FEISHU_REASONING_LEVELS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 if str(RUNTIME_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_SRC_DIR))
@@ -237,16 +233,20 @@ def load_feishu_model_prefs() -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
+    provider = str(
+        data.get("model_provider") or data.get("provider") or data.get("profile") or ""
+    ).strip()
     model = str(data.get("model") or "").strip()
     reasoning = str(data.get("reasoning_effort") or data.get("reasoning") or "").strip()
-    return {"model": model, "reasoning_effort": reasoning}
+    return {"model_provider": provider, "provider": provider, "model": model, "reasoning_effort": reasoning}
 
 
-def save_feishu_model_prefs(model: str, reasoning_effort: str) -> Path:
+def save_feishu_model_prefs(model: str, reasoning_effort: str, model_provider: str = "") -> Path:
     ensure_dir(DEFAULT_HOME)
     FEISHU_MODEL_CONFIG_PATH.write_text(
         json.dumps(
             {
+                "model_provider": str(model_provider or "").strip(),
                 "model": str(model or "").strip(),
                 "reasoning_effort": str(reasoning_effort or "").strip(),
             },
@@ -263,67 +263,153 @@ def save_feishu_model_prefs(model: str, reasoning_effort: str) -> Path:
     return FEISHU_MODEL_CONFIG_PATH
 
 
-def resolve_feishu_model_choice(raw_text: str) -> Optional[dict[str, str]]:
+def _normalize_model_provider(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _provider_display_name(provider_id: str, provider_config: dict[str, Any]) -> str:
+    label = str(provider_config.get("name") or "").strip()
+    return label or str(provider_id or "").strip() or "default"
+
+
+def _provider_matches(token: str, provider_id: str, provider_config: dict[str, Any]) -> bool:
+    wanted = _normalize_model_provider(token)
+    if not wanted:
+        return False
+    candidates = {
+        _normalize_model_provider(provider_id),
+        _normalize_model_provider(_provider_display_name(provider_id, provider_config)),
+    }
+    base_url = str(provider_config.get("base_url") or "").strip()
+    if base_url:
+        candidates.add(_normalize_model_provider(base_url))
+    return wanted in candidates
+
+
+def configured_model_providers(codex_home: Optional[str | Path] = None) -> dict[str, dict[str, Any]]:
+    config, _, _ = load_codex_config(codex_home)
+    providers = config.get("model_providers") or {}
+    if isinstance(providers, dict):
+        return {
+            str(provider_id): provider_config
+            for provider_id, provider_config in providers.items()
+            if isinstance(provider_config, dict)
+        }
+    return {}
+
+
+def supported_feishu_model_choices(
+    codex_home: Optional[str | Path] = None,
+) -> list[dict[str, str]]:
+    config, _, _ = load_codex_config(codex_home)
+    providers = configured_model_providers(codex_home)
+    current_provider = str(config.get("model_provider") or "").strip()
+    provider_ids = list(providers)
+    if current_provider and current_provider not in providers:
+        provider_ids.insert(0, current_provider)
+    if not provider_ids:
+        provider_ids = [""]
+
+    choices: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in SUPPORTED_FEISHU_MODELS:
+        item_provider = str(item.get("provider") or "").strip()
+        target_providers = [item_provider] if item_provider else provider_ids
+        for provider_id in target_providers:
+            provider_config = providers.get(provider_id, {})
+            key = (
+                provider_id,
+                str(item["name"]).strip().lower(),
+                str(item["reasoning"]).strip().lower(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            choices.append(
+                {
+                    "provider": provider_id,
+                    "model_provider": provider_id,
+                    "provider_label": _provider_display_name(provider_id, provider_config),
+                    "model": str(item["name"]).strip(),
+                    "reasoning_effort": str(item["reasoning"]).strip(),
+                    "name": str(item["name"]).strip(),
+                    "reasoning": str(item["reasoning"]).strip(),
+                }
+            )
+    return choices
+
+
+def _parse_feishu_model_tokens(raw_text: str) -> tuple[str, str, list[str]]:
     text = str(raw_text or "").strip()
     if not text:
-        return None
+        return "", "", []
     normalized = re.sub(r"\s+", " ", text).strip().lower()
-    if normalized in _SUPPORTED_FEISHU_MODEL_NAMES:
-        for item in SUPPORTED_FEISHU_MODELS:
-            if item["name"].strip().lower() == normalized:
-                return {
-                    "model": item["name"],
-                    "reasoning_effort": item["reasoning"],
-                    "name": item["name"],
-                    "reasoning": item["reasoning"],
-                }
-    compact = normalized.replace(" ", "")
-    if compact in _SUPPORTED_FEISHU_MODEL_NAMES:
-        for item in SUPPORTED_FEISHU_MODELS:
-            if item["name"].strip().lower() == compact:
-                return {
-                    "model": item["name"],
-                    "reasoning_effort": item["reasoning"],
-                    "name": item["name"],
-                    "reasoning": item["reasoning"],
-                }
     tokens = [part for part in re.split(r"[\s/]+", normalized) if part]
     reasoning = ""
     model_tokens: list[str] = []
     for token in tokens:
-        if token in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+        if token in _FEISHU_REASONING_LEVELS:
             reasoning = token
         else:
             model_tokens.append(token)
-    model = " ".join(model_tokens).strip() or compact
+    model = " ".join(model_tokens).strip()
     model = model.replace(" ", "")
     if model.startswith("/model"):
         model = model.removeprefix("/model").strip()
-    key = f"{model.lower()}::{reasoning.lower()}"
-    if reasoning and key in _SUPPORTED_FEISHU_MODEL_KEYS:
-        item = _SUPPORTED_FEISHU_MODEL_KEYS[key]
-        return {
-            "model": item["name"],
-            "reasoning_effort": item["reasoning"],
-            "name": item["name"],
-            "reasoning": item["reasoning"],
-        }
-    for item in SUPPORTED_FEISHU_MODELS:
-        if item["name"].strip().lower() == model.lower():
-            if not reasoning or item["reasoning"].strip().lower() == reasoning.lower():
-                return {
-                    "model": item["name"],
-                    "reasoning_effort": item["reasoning"],
-                    "name": item["name"],
-                    "reasoning": item["reasoning"],
-                }
-    return None
+    return model, reasoning, model_tokens
 
 
-def format_supported_feishu_models() -> str:
-    return "\n".join(
-        f"- {item['name']} {item['reasoning']}".strip() for item in SUPPORTED_FEISHU_MODELS
-    )
+def resolve_feishu_model_choice(
+    raw_text: str,
+    *,
+    codex_home: Optional[str | Path] = None,
+) -> tuple[Optional[dict[str, str]], str]:
+    model, reasoning, model_tokens = _parse_feishu_model_tokens(raw_text)
+    if not model:
+        return None, "empty"
+
+    providers = configured_model_providers(codex_home)
+    provider_filter = ""
+    if len(model_tokens) >= 2:
+        first_token = model_tokens[0]
+        for provider_id, provider_config in providers.items():
+            if _provider_matches(first_token, provider_id, provider_config):
+                provider_filter = provider_id
+                model = "".join(model_tokens[1:]).strip()
+                break
+
+    matches: list[dict[str, str]] = []
+    for item in supported_feishu_model_choices(codex_home):
+        if provider_filter and item["model_provider"] != provider_filter:
+            continue
+        if item["model"].strip().lower() != model.lower():
+            continue
+        if reasoning and item["reasoning_effort"].strip().lower() != reasoning.lower():
+            continue
+        matches.append(item)
+
+    if len(matches) == 1:
+        return matches[0], ""
+    if len(matches) > 1:
+        providers_seen = {item["model_provider"] for item in matches}
+        if len(providers_seen) > 1 and not provider_filter:
+            return None, "ambiguous-provider"
+        if not reasoning:
+            return matches[0], ""
+        return None, "ambiguous-reasoning"
+    return None, "unknown"
+
+
+def format_supported_feishu_models(codex_home: Optional[str | Path] = None) -> str:
+    grouped: dict[str, list[str]] = {}
+    for item in supported_feishu_model_choices(codex_home):
+        provider = item["provider_label"]
+        grouped.setdefault(provider, []).append(f"{item['model']} {item['reasoning_effort']}".strip())
+    lines: list[str] = []
+    for provider in sorted(grouped):
+        values = sorted(set(grouped[provider]))
+        lines.append(f"- {provider}: " + "，".join(values))
+    return "\n".join(lines)
 
 
 def ensure_feishu_codex_home(
@@ -391,13 +477,16 @@ def ensure_feishu_codex_home(
 
     prefs = load_feishu_model_prefs()
     config, _, _ = load_codex_config(target_home)
+    selected_provider = (
+        prefs.get("model_provider") or str(config.get("model_provider") or "").strip()
+    )
     selected_model = prefs.get("model") or str(config.get("model") or "").strip() or "gpt-5.4"
     reasoning = (
         prefs.get("reasoning_effort")
         or str(config.get("model_reasoning_effort") or config.get("reasoning_effort") or "").strip()
         or "high"
     )
-    write_feishu_model_into_config(target_home, selected_model, reasoning)
+    write_feishu_model_into_config(target_home, selected_model, reasoning, selected_provider)
     return target_home
 
 
@@ -405,6 +494,7 @@ def write_feishu_model_into_config(
     codex_home: str | Path,
     model: str,
     reasoning_effort: str,
+    model_provider: str = "",
 ) -> Path:
     home = Path(codex_home).expanduser().resolve()
     ensure_dir(home)
@@ -419,6 +509,7 @@ def write_feishu_model_into_config(
     lines = base_text.splitlines()
     rewritten = False
     inserted_reasoning = False
+    rewritten_provider = False
     for idx, raw_line in enumerate(lines):
         stripped = raw_line.strip()
         if stripped.startswith("model ="):
@@ -427,17 +518,22 @@ def write_feishu_model_into_config(
         elif stripped.startswith("model_reasoning_effort ="):
             lines[idx] = f'model_reasoning_effort = "{reasoning_effort}"'
             inserted_reasoning = True
+        elif stripped.startswith("model_provider =") and model_provider:
+            lines[idx] = f'model_provider = "{model_provider}"'
+            rewritten_provider = True
     if not rewritten:
         lines.insert(0, f'model = "{model}"')
+    if model_provider and not rewritten_provider:
+        lines.insert(0, f'model_provider = "{model_provider}"')
     if not inserted_reasoning:
-        insert_at = 1 if lines else 0
+        insert_at = 2 if model_provider and len(lines) >= 2 else 1 if lines else 0
         lines.insert(insert_at, f'model_reasoning_effort = "{reasoning_effort}"')
     target_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     try:
         target_path.chmod(0o600)
     except OSError:
         pass
-    save_feishu_model_prefs(model, reasoning_effort)
+    save_feishu_model_prefs(model, reasoning_effort, model_provider)
     return target_path
 
 
@@ -755,6 +851,8 @@ _GENERIC_TOOL_SUMMARY_PHRASES = {
     "文件和目录已经确认。",
     "搜索完成，相关线索已经定位。",
     "相关文件已读到，可以继续判断和改动。",
+    "文件位置已经确认，后续可以直接读取或修改目标文件。",
+    "搜索结果已经回来，我会只提炼和任务有关的线索，不展开匹配原文。",
     "这一步没有按预期完成，我会根据反馈换一种方式继续确认。",
     "本机改动已经落下，接下来要验证它是否真的生效。",
 }
@@ -1070,7 +1168,7 @@ def _command_topic(command: str) -> str:
         return "homeassistant"
     if _command_matches_any(value, ("卫生间", "人体", "human presence", "occupancy", "motion_sensor", "motion sensor")):
         return "homeassistant"
-    if _command_matches_any(value, ("jump host", "jump_host", "proxyjump", "openwrt", "pve", "homenet", "home lan", "192.168.")):
+    if _command_matches_any(value, ("oect", "openwrt", "pve", "homenet", "home lan", "192.168.")):
         return "home_network"
     if _command_matches_any(value, ("user_memory.md", "codeX_feishu_memory.md".lower(), "shared-memory.md", "shared_memory.py")):
         return "memory"
@@ -1366,7 +1464,7 @@ def command_complete_explanation(
         if area == "modify":
             return intent, f"{subject} 的本机改动已经写入，接下来要用语法检查和服务状态验证它。"
         return intent, _PUBLIC_COMMAND_DONE.get(area, f"{subject} 已经确认，我会继续推进后面的判断。")
-    if "ssh" in value or "jump host" in value or "proxyjump" in value:
+    if "ssh" in value or "oect" in value:
         if failed:
             return intent, "这条远程连接路径没有打通，我会优先改走共享记忆里的家庭内网接入规则继续确认。"
         if topic in {"homeassistant", "home_network"}:
@@ -2226,38 +2324,51 @@ class CodexFeishuService:
 
     def model_help_text(self) -> str:
         runtime_state = current_codex_runtime_state(codex_home=self.codex_home, env_file=self.env_file)
-        current = f"{runtime_state.model or '默认模型'} {runtime_state.reasoning_effort or '默认'}".strip()
+        providers = configured_model_providers(self.codex_home)
+        provider_label = _provider_display_name(
+            runtime_state.model_provider,
+            providers.get(runtime_state.model_provider, {}),
+        )
+        current = (
+            f"{provider_label} / {runtime_state.model or '默认模型'} "
+            f"{runtime_state.reasoning_effort or '默认'}"
+        ).strip()
         return "\n".join(
             [
                 f"当前飞书模型：{current}",
                 "",
                 "支持切换：",
-                format_supported_feishu_models(),
+                format_supported_feishu_models(self.codex_home),
                 "",
                 "用法：",
                 "- `/model` 查看当前模型",
-                "- `/model gpt-5.4` 切到 gpt-5.4 high",
-                "- `/model gpt-5.5` 切到 gpt-5.5 xhigh",
-                "- `/model gpt-5.4 medium` 按指定思考强度切换",
+                "- `/model fhl gpt-5.4 high` 按供应商/API 精确切换",
+                "- `/model gpt-5.4 high` 只有一个供应商匹配时可省略供应商",
+                "- 以后多个供应商有同名模型时，请加供应商前缀",
             ]
         ).strip()
 
     def switch_feishu_model(self, raw_choice: str) -> tuple[bool, str]:
-        choice = resolve_feishu_model_choice(raw_choice)
+        choice, reason = resolve_feishu_model_choice(raw_choice, codex_home=self.codex_home)
         if choice is None:
-            return False, (
-                "未识别这个飞书模型。\n\n"
-                + self.model_help_text()
-            )
+            if reason == "ambiguous-provider":
+                prefix = "这个模型名在多个供应商/API 下都存在，请加供应商前缀。"
+            elif reason == "ambiguous-reasoning":
+                prefix = "这个模型有多个思考强度，请把思考程度也写上。"
+            else:
+                prefix = "未识别这个飞书模型。"
+            return False, prefix + "\n\n" + self.model_help_text()
         config_path = write_feishu_model_into_config(
             self.codex_home or DEFAULT_FEISHU_CODEX_HOME,
             choice["model"],
             choice["reasoning_effort"],
+            choice["model_provider"],
         )
         self._runtime_signature = None
+        provider_label = choice.get("provider_label") or choice.get("model_provider") or "default"
         return True, "\n".join(
             [
-                f"已切换飞书模型到：{choice['model']} {choice['reasoning_effort']}",
+                f"已切换飞书模型到：{provider_label} / {choice['model']} {choice['reasoning_effort']}",
                 "",
                 "说明：这只影响飞书机器人链路，不影响桌面 Codex 当前模型。",
                 f"配置已写入：`{config_path}`",
@@ -3136,7 +3247,7 @@ class CodexFeishuService:
             "- 公开执行进展不是标题，也不是空泛状态。要像桌面端 commentary 一样具体，例如“我先查 Home Assistant 的实体来源，再确认卫生间人体传感器的 entity_id 和当前状态”。",
             "- 每当你开始一个新的实质步骤，或一个步骤有关键发现/失败/通过时，单独输出一行：`执行进展：...`。这行会显示在飞书卡片的执行过程区，最终正文会自动移除这些标记行。",
             "- 在第一次调用工具之前，必须先输出一条 `执行进展：...`，说明这次准备从哪里查、为什么这么查。后续每个实质阶段最多输出 1 条关键进展，避免重复刷屏。",
-            "- 不要输出泛化空话，例如“文件和目录已确认”“相关线索已定位”“这一步没有按预期完成”。要说清楚对象和含义，例如“执行进展：我先查本机共享记忆里的 Home Assistant 入口，确认是否应该经家庭内网跳板访问”。",
+            "- 不要输出泛化空话，例如“文件和目录已确认”“相关线索已定位”“这一步没有按预期完成”。要说清楚对象和含义，例如“执行进展：我先查本机共享记忆里的 Home Assistant 入口，确认是否应该经 OECT 跳板访问”。",
             "- 你看到的是本机共享记忆层；不同 Codex 登录方式的云端 thread 不共享，但本机记忆和任务库共享。",
             "- 飞书对话采用独立轻量 agent 记忆：每轮都是新的本机 Codex turn，只带滚动摘要和最近几轮，避免长上下文拖慢和过度消耗 token。",
             "- 如果用户要求创建、安装或更新 skill，必须写入 Codex 可见路径，例如 $CODEX_HOME/skills 或 $HOME/.agents/skills；不要创建飞书专用 skill。",
@@ -3145,6 +3256,7 @@ class CodexFeishuService:
             "- 遇到家庭设备、Home Assistant/HASS、NAS、PVE、OpenWrt、远程服务器、skill 或自动化任务问题时，先读取共享记忆和 Codex 可见 skill/脚本；不要因为默认飞书工作区没有线索就断言缺认证或不可完成。",
             "- 查询用户自有家庭自动化状态时，只做只读状态读取；可以读取灯、门磁、温湿度、人体/移动/存在传感器等设备状态，但不要访问摄像头/音频，也不要监控第三方隐私。",
             "- 如果 Mac 直连家庭内网服务失败，不要直接下结论；优先使用共享记忆里的家庭内网跳板、Home Assistant 接入规则或已有脚本继续验证。",
+            "- 用户查询自己家中 Home Assistant 暴露的设备状态时，可以做只读状态读取并报告实体状态。人体/移动/存在传感器可以报告传感器自身 on/off/last_changed/friendly_name 等状态；不要访问摄像头、音频，也不要对画面或第三方隐私做额外推断。",
             "",
             f"飞书来源：{event.source.description}",
             f"工作目录：{self.workspace}",
