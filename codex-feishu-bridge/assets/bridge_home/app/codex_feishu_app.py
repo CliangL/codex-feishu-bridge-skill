@@ -670,6 +670,17 @@ _TECHNICAL_PROGRESS_RE = re.compile(
     r"/Users/|\\.codex/|\\.hermes/|apply_patch|MCP|mcp|tool|工具调用|执行命令|运行代码|"
     r"等待授权|准备修改|准备调用|准备在本机执行|本机执行命令|/Applications/|/tmp/|/var/|/opt/)"
 )
+_STRUCTURED_BLOB_PROGRESS_RE = re.compile(
+    r"(?is)(看到：\s*[\{\[]|['\"]content['\"]\s*:|['\"]type['\"]\s*:|['\"]text['\"]\s*:|"
+    r"\\n|github_fetch\s*返回了结果|mcp.*返回了结果|tool.*返回了结果)"
+)
+_SENSITIVE_TOOL_ARG_KEY_RE = re.compile(
+    r"(?i)(secret|token|password|passwd|authorization|api[_-]?key|access[_-]?key|refresh[_-]?token)"
+)
+_VERBOSE_TOOL_ARG_KEY_RE = re.compile(
+    r"(?i)^(content|contents|text|body|file_content|data|payload|result|output|"
+    r"aggregated_output|image|image_url|bytes|base64|blob|diff|patch)$"
+)
 
 
 def sanitize_thought_summary(text: str, *, limit: int = 900) -> Optional[str]:
@@ -682,6 +693,8 @@ def sanitize_thought_summary(text: str, *, limit: int = 900) -> Optional[str]:
         if not line:
             continue
         if _TECHNICAL_PROGRESS_RE.search(line):
+            continue
+        if _STRUCTURED_BLOB_PROGRESS_RE.search(line):
             continue
         kept.append(line)
     cleaned = "\n".join(kept).strip()
@@ -728,6 +741,15 @@ _LOW_VALUE_PROGRESS_PHRASES = (
     "我在理解你的请求",
     "我会先核对已有上下文",
 )
+_GENERIC_TOOL_SUMMARY_PHRASES = {
+    "工具步骤已完成。",
+    "工具步骤未完成，已根据反馈调整路线。",
+    "检查步骤已完成。",
+    "本机改动已写入。",
+    "验证步骤已通过。",
+    "文件和目录已经确认。",
+    "搜索完成，相关线索已经定位。",
+}
 
 
 def strip_progress_step(text: str) -> str:
@@ -739,6 +761,8 @@ def is_low_value_progress(text: str) -> bool:
     if not body:
         return True
     if _TECHNICAL_PROGRESS_RE.search(body):
+        return True
+    if _STRUCTURED_BLOB_PROGRESS_RE.search(body):
         return True
     return any(phrase in body for phrase in _LOW_VALUE_PROGRESS_PHRASES)
 
@@ -792,15 +816,88 @@ def clean_tool_lines(lines: list[str], *, max_lines: int = 8) -> list[str]:
     cleaned: list[str] = []
     keys: list[str] = []
     for raw in lines:
-        line = compact_public_text(str(raw or ""), limit=180)
-        if not line or is_low_value_progress(line):
+        line = compact_public_text(redact_sensitive_text(str(raw or "")), limit=220)
+        if not line:
             continue
-        key = normalize_progress_key(line)
+        if line in _GENERIC_TOOL_SUMMARY_PHRASES:
+            continue
+        if _STRUCTURED_BLOB_PROGRESS_RE.search(line) and not line.startswith(("调用", "执行", "修改")):
+            continue
+        key = normalize_tool_key(line)
         if not key or key in keys:
             continue
         cleaned.append(line)
         keys.append(key)
     return cleaned[-max_lines:]
+
+
+def normalize_tool_key(text: str) -> str:
+    value = redact_sensitive_text(str(text or "")).strip().lower()
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def public_tool_name(item: dict[str, Any]) -> str:
+    raw = (
+        item.get("tool")
+        or item.get("name")
+        or item.get("server")
+        or "工具"
+    )
+    name = compact_public_text(str(raw), limit=80)
+    lowered = name.lower()
+    if lowered.startswith("github_") or lowered in {"github", "github.fetch", "github_fetch"}:
+        if "fetch" in lowered:
+            return "GitHub 文件读取"
+        if "search" in lowered:
+            return "GitHub 搜索"
+        if "pr" in lowered or "pull" in lowered:
+            return "GitHub PR 检查"
+        if "issue" in lowered:
+            return "GitHub issue 检查"
+        return "GitHub 查询"
+    if lowered.startswith("web") or "browser" in lowered:
+        return "网页查询"
+    if lowered.startswith("lark") or lowered.startswith("feishu"):
+        return "飞书接口调用"
+    return name or "工具"
+
+
+def raw_tool_name(item: dict[str, Any]) -> str:
+    raw = (
+        item.get("tool")
+        or item.get("name")
+        or item.get("server")
+        or "工具"
+    )
+    return compact_public_text(str(raw), limit=96) or "工具"
+
+
+def tool_server_name(item: dict[str, Any]) -> str:
+    server = str(item.get("server") or "").strip()
+    return compact_public_text(server, limit=80)
+
+
+def public_tool_start_text(tool_name: str) -> str:
+    if tool_name.startswith("GitHub"):
+        return f"我在用{tool_name}补齐外部仓库信息。"
+    if tool_name == "网页查询":
+        return "我在查询网页信息，用公开资料补齐判断依据。"
+    if tool_name == "飞书接口调用":
+        return "我在调用飞书接口确认实际消息或配置状态。"
+    return f"我在调用{tool_name}获取实际结果。"
+
+
+def public_tool_done_text(tool_name: str, *, failed: bool) -> str:
+    if failed:
+        return f"{tool_name}没有完成，我会根据错误换一种方式继续。"
+    if tool_name.startswith("GitHub"):
+        return f"{tool_name}完成，我会只提炼结论，不展开文件正文。"
+    if tool_name == "网页查询":
+        return "网页查询完成，我会把公开资料里的关键点纳入判断。"
+    if tool_name == "飞书接口调用":
+        return "飞书接口调用完成，实际状态已经确认。"
+    return f"{tool_name}返回了结果，我会提炼关键结论继续。"
 
 
 def _compact_path_match(match: re.Match[str]) -> str:
@@ -836,6 +933,44 @@ def split_shell_words(script: str) -> list[str]:
         return shlex.split(script)
     except ValueError:
         return str(script or "").split()
+
+
+def sanitize_tool_argument(value: Any, *, depth: int = 0) -> Any:
+    if depth > 2:
+        return "..."
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _SENSITIVE_TOOL_ARG_KEY_RE.search(key_text):
+                sanitized[key_text] = "***"
+            elif _VERBOSE_TOOL_ARG_KEY_RE.search(key_text):
+                sanitized[key_text] = "[已省略]"
+            else:
+                sanitized[key_text] = sanitize_tool_argument(item, depth=depth + 1)
+        return sanitized
+    if isinstance(value, list):
+        items = [sanitize_tool_argument(item, depth=depth + 1) for item in value[:3]]
+        if len(value) > 3:
+            items.append(f"...另 {len(value) - 3} 项")
+        return items
+    if isinstance(value, str):
+        return compact_public_text(redact_sensitive_text(value), limit=120)
+    return value
+
+
+def compact_tool_arguments(arguments: Any, *, limit: int = 150) -> str:
+    if arguments in (None, "", {}, []):
+        return ""
+    try:
+        sanitized = sanitize_tool_argument(arguments)
+        text = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        text = str(arguments)
+    text = compact_public_text(redact_sensitive_text(text), limit=limit)
+    if _STRUCTURED_BLOB_PROGRESS_RE.search(text):
+        return ""
+    return text
 
 
 def basename_list(values: list[str], *, limit: int = 3) -> str:
@@ -1035,8 +1170,10 @@ def command_complete_explanation(
     if words and words[0] in {"rg", "grep"}:
         clue = summarize_search_output(output, exit_code=exit_code)
         if failed and exit_code != 1:
-            return intent, f"搜索命令失败了，返回 exit={exit_code}；我会换一种方式定位。{(' ' + clue) if clue else ''}"
-        return intent, f"搜索结果已经回来。{clue or '这次没有额外输出。'}"
+            return intent, f"搜索这一步没有完成，返回 exit={exit_code}；我会换一种方式定位。"
+        if exit_code == 1:
+            return intent, "搜索没有找到匹配项；如果是在查残留文案，说明这类残留已经清掉。"
+        return intent, "搜索结果已经回来，我会只提炼和任务有关的线索，不展开匹配原文。"
     if "py_compile" in value:
         if failed:
             clue = extract_output_clue(output)
@@ -1048,20 +1185,18 @@ def command_complete_explanation(
             return intent, f"服务检查或重启没有成功，我需要继续看 launchd 返回的信息。{(' 看到：' + clue) if clue else ''}"
         return intent, f"服务检查或重启完成。{('看到：' + clue) if clue else '没有出现错误输出。'}"
     if "tail " in value or "log " in value:
-        clue = extract_output_clue(output)
         if failed:
-            return intent, f"读取日志失败了，我会改用别的方式确认服务状态。{(' 反馈：' + clue) if clue else ''}"
-        return intent, f"日志已经读到，我会根据最新几行判断服务是否正常。{(' 看到：' + clue) if clue else ''}"
-    clue = extract_output_clue(output)
+            return intent, "读取日志失败了，我会改用别的方式确认服务状态。"
+        return intent, "日志已经读到，我会根据最新记录判断服务是否正常，不把原始日志塞进执行过程。"
     if failed:
-        return intent, f"这一步返回 exit={exit_code}，没有按预期完成；我会根据反馈调整路线。{(' 反馈：' + clue) if clue else ''}"
+        return intent, f"这一步返回 exit={exit_code}，没有按预期完成；我会根据反馈调整路线。"
     if intent == "inspect":
-        return intent, f"检查有结果了，我会根据拿到的线索决定下一步。{(' 看到：' + clue) if clue else ''}"
+        return intent, "检查有结果了，我会根据拿到的线索决定下一步。"
     if intent == "modify":
-        return intent, f"本机改动已经落下，接下来要验证它是否真的生效。{(' 反馈：' + clue) if clue else ''}"
+        return intent, "本机改动已经落下，接下来要验证它是否真的生效。"
     if intent == "verify":
-        return intent, f"验证通过了，说明这一轮改动至少能正常加载或运行。{(' 输出：' + clue) if clue else ''}"
-    return intent, f"这一步已经完成，我继续推进后面的判断。{(' 反馈：' + clue) if clue else ''}"
+        return intent, "验证通过了，说明这一轮改动至少能正常加载或运行。"
+    return intent, "这一步已经完成，我继续推进后面的判断。"
 
 
 def progress_explanation(
@@ -1110,6 +1245,52 @@ def command_progress_line(
 
 
 def command_tool_summary(command: str, *, exit_code: Any = None, output: Any = "") -> str:
+    script = shell_script_from_command(command) or str(command or "").strip()
+    display = compact_public_text(redact_sensitive_text(script), limit=180)
+    failed = exit_code not in (None, 0)
+    if not display:
+        display = "本机命令"
+    if exit_code is None:
+        return f"执行命令：{display}"
+    status = f"exit={exit_code}" if failed else "完成"
+    return f"执行命令：{display}（{status}）"
+
+
+def file_change_tool_summary(changes: Any) -> str:
+    if not isinstance(changes, list) or not changes:
+        return "修改文件：未返回文件列表"
+    parts: list[str] = []
+    for change in changes[:4]:
+        if not isinstance(change, dict):
+            continue
+        kind = (change.get("kind") or {}).get("type") if isinstance(change.get("kind"), dict) else change.get("kind")
+        path = str(change.get("path") or "").strip()
+        if not path:
+            continue
+        filename = Path(path).name or compact_public_text(path, limit=60)
+        parts.append(f"{kind or 'update'} {filename}")
+    if len(changes) > 4:
+        parts.append(f"另 {len(changes) - 4} 项")
+    return f"修改文件：{compact_public_text('、'.join(parts), limit=180)}" if parts else "修改文件：未返回文件列表"
+
+
+def mcp_tool_summary(item: dict[str, Any], *, dynamic: bool = False) -> str:
+    tool = raw_tool_name(item)
+    server = tool_server_name(item)
+    failed = bool(item.get("error")) or item.get("success") is False
+    args = compact_tool_arguments(item.get("arguments"))
+    if dynamic:
+        label = f"调用工具：{tool}"
+    elif server:
+        label = f"调用 MCP：{server}.{tool}"
+    else:
+        label = f"调用工具：{tool}"
+    if args:
+        label = f"{label} {args}"
+    return f"{label}（{'失败' if failed else '完成'}）"
+
+
+def legacy_command_tool_summary(command: str, *, exit_code: Any = None, output: Any = "") -> str:
     area = public_command_area(command)
     failed = exit_code not in (None, 0)
     if failed and exit_code != 1:
@@ -1139,21 +1320,13 @@ def summarize_item(notification: dict[str, Any]) -> Optional[str]:
             output=item.get("aggregatedOutput") or item.get("output") or "",
         )
     if item_type == "fileChange":
-        changes = item.get("changes") or []
-        paths = []
-        for change in changes[:3]:
-            if isinstance(change, dict) and change.get("path"):
-                paths.append(str(change["path"]))
-        suffix = f"：{', '.join(paths)}" if paths else ""
-        if len(changes) > 3:
-            suffix += f"，另 {len(changes) - 3} 项"
-        return f"修改文件{suffix}"
+        return file_change_tool_summary(item.get("changes") or [])
     if item_type == "mcpToolCall":
-        server = item.get("server") or "mcp"
-        tool = item.get("tool") or "tool"
-        return f"调用 MCP：{server}.{tool}"
+        return mcp_tool_summary(item)
     if item_type == "dynamicToolCall":
-        return f"调用工具：{item.get('name') or item.get('tool') or 'dynamic'}"
+        return mcp_tool_summary(item, dynamic=True)
+    if item_type == "collabAgentToolCall":
+        return mcp_tool_summary(item, dynamic=True)
     return None
 
 
@@ -1219,27 +1392,16 @@ def summarize_public_progress(notification: dict[str, Any], *, step: int) -> Opt
             detail=f"涉及：{change_summary}" if change_summary else "",
         )
     if item_type in {"mcpToolCall", "dynamicToolCall", "collabAgentToolCall"}:
-        tool_name = item.get("tool") or item.get("name") or item.get("server") or "工具"
-        tool_name = compact_public_text(str(tool_name), limit=80)
+        tool_name = public_tool_name(item)
         if started:
             return progress_explanation(
                 step=step,
-                text=f"我调用 {tool_name} 来完成当前步骤，因为这类信息不能只靠猜，需要让工具给出实际结果。",
+                text=public_tool_start_text(tool_name),
             )
         failed = bool(item.get("error")) or item.get("success") is False
-        clue = extract_output_clue(
-            item.get("result")
-            or item.get("output")
-            or item.get("error")
-            or item.get("content")
-            or ""
-        )
         return progress_explanation(
             step=step,
-            text=f"{tool_name} 没有完成，我会根据反馈换一种方式。"
-            if failed
-            else f"{tool_name} 返回了结果，我会把这个结果纳入下一步判断。",
-            detail=f"看到：{clue}" if clue else "",
+            text=public_tool_done_text(tool_name, failed=failed),
         )
     if item_type == "agentMessage":
         return None
@@ -2367,7 +2529,7 @@ class CodexFeishuService:
                 "不要泄露 API key、token、密码或完整 access key。",
                 "飞书只是任务入口；实际执行必须使用本机当前 Codex 配置、skill 和工作区。",
                 "如果任务需要创建或安装 skill，必须写入 Codex 可见路径，例如 $CODEX_HOME/skills 或 $HOME/.agents/skills；不要创建飞书专用 skill。",
-                "如果需要新增或维护飞书通知型定时任务，必须通过 $HOME/.codex-feishu/app/tasks.py 的 add/pause/resume/delete 接口维护共享任务库，不要直接手写 tasks.json。",
+                "如果需要新增或维护飞书通知型定时任务，必须通过 $CODEX_FEISHU_HOME/app/tasks.py 的 add/pause/resume/delete 接口维护共享任务库，不要直接手写 tasks.json。",
                 "这是通知型定时任务；最终回答只输出要推送给用户的通知正文，不要写执行过程、尾注、工具调用、完成情况、验证结果、来源清单或需要用户处理的事项，除非任务正文明确要求。",
                 "",
                 "## 共享本机记忆",
@@ -2760,7 +2922,7 @@ class CodexFeishuService:
             "- 飞书对话采用独立轻量 agent 记忆：每轮都是新的本机 Codex turn，只带滚动摘要和最近几轮，避免长上下文拖慢和过度消耗 token。",
             "- 如果用户要求创建、安装或更新 skill，必须写入 Codex 可见路径，例如 $CODEX_HOME/skills 或 $HOME/.agents/skills；不要创建飞书专用 skill。",
             "- 如果用户通过飞书创建定时任务，要使用本机共享任务库；任务应能在 Codex automations 里被看到。",
-            "- 创建、暂停、恢复或删除飞书通知型定时任务时，必须调用 $HOME/.codex-feishu/app/tasks.py 的 add/pause/resume/delete 接口，不要直接手写 ~/.codex-feishu/tasks.json；该接口会同步 Codex automations 镜像。",
+            "- 创建、暂停、恢复或删除飞书通知型定时任务时，必须调用 $CODEX_FEISHU_HOME/app/tasks.py 的 add/pause/resume/delete 接口，不要直接手写 $CODEX_FEISHU_HOME/tasks.json；该接口会同步 Codex automations 镜像。",
             "",
             f"飞书来源：{event.source.description}",
             f"工作目录：{self.workspace}",
