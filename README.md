@@ -177,7 +177,7 @@ CODEX_FEISHU_DOMAIN=feishu
 CODEX_FEISHU_CONNECTION_MODE=websocket
 CODEX_FEISHU_NOTIFY_CHAT_ID=FEISHU_NOTIFY_CHAT_ID
 CODEX_FEISHU_REQUIRE_MENTION=false
-CODEX_FEISHU_FALLBACK_MODELS=yukihoapi|gpt-5.4|high
+CODEX_FEISHU_FALLBACK_MODELS=deepseek|deepseek-v4-flash|medium
 ```
 
 不要把 `.env`、日志、对话记忆、真实 chat id 或 token 提交到仓库。
@@ -238,7 +238,7 @@ launchctl print gui/$(id -u)/com.codex.feishu
 - `/model`：查看飞书侧当前 provider、model、reasoning 和可选模型。
 - `/model <provider> <model> <reasoning>`：按 provider 精确切换，例如 `/model fhl gpt-5.4 high`。
 - `/model <model> <reasoning>`：只有模型名在所有 provider 中不冲突时才允许省略 provider。
-- `CODEX_FEISHU_FALLBACK_MODELS`：本地 `.env` 里的备用模型列表，支持逗号、分号或换行分隔，单项格式推荐 `provider|model|reasoning`，例如 `yukihoapi|gpt-5.4|high`。
+- `CODEX_FEISHU_FALLBACK_MODELS`：本地 `.env` 里的备用模型列表，支持逗号、分号或换行分隔，单项格式推荐 `provider|model|reasoning`，例如 `deepseek|deepseek-v4-flash|medium`。
 - `/task daily HH:MM ...`：创建每日任务。
 - `/task every 30m ...`：创建间隔任务。
 - `/task at YYYY-MM-DDTHH:MM ...`：创建一次性任务。
@@ -489,7 +489,7 @@ Feishu chat commands:
 Fallback models are configured locally in `.env`:
 
 ```bash
-CODEX_FEISHU_FALLBACK_MODELS=yukihoapi|gpt-5.4|high
+CODEX_FEISHU_FALLBACK_MODELS=deepseek|deepseek-v4-flash|medium
 ```
 
 Use comma, semicolon, or newline separators for multiple candidates. Each item can use `provider|model|reasoning`, `provider/model/reasoning`, or the same free-form syntax accepted by `/model`.

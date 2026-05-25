@@ -51,6 +51,8 @@ SUPPORTED_FEISHU_MODELS: tuple[dict[str, str], ...] = (
     {"provider": "", "name": "gpt-5.4", "reasoning": "high"},
     {"provider": "", "name": "gpt-5.4", "reasoning": "medium"},
     {"provider": "", "name": "gpt-5.4-mini", "reasoning": "medium"},
+    {"provider": "", "name": "deepseek-v4-flash", "reasoning": "medium"},
+    {"provider": "", "name": "deepseek-v4-pro", "reasoning": "high"},
 )
 _FEISHU_REASONING_LEVELS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
