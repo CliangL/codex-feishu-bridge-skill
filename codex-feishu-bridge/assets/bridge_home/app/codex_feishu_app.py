@@ -30,7 +30,7 @@ import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -241,18 +241,18 @@ def load_feishu_model_prefs() -> dict[str, str]:
     return {"model_provider": provider, "provider": provider, "model": model, "reasoning_effort": reasoning}
 
 
+def _model_pref_payload(model: str, reasoning_effort: str, model_provider: str = "") -> dict[str, str]:
+    return {
+        "model_provider": str(model_provider or "").strip(),
+        "model": str(model or "").strip(),
+        "reasoning_effort": str(reasoning_effort or "").strip(),
+    }
+
+
 def save_feishu_model_prefs(model: str, reasoning_effort: str, model_provider: str = "") -> Path:
     ensure_dir(DEFAULT_HOME)
     FEISHU_MODEL_CONFIG_PATH.write_text(
-        json.dumps(
-            {
-                "model_provider": str(model_provider or "").strip(),
-                "model": str(model or "").strip(),
-                "reasoning_effort": str(reasoning_effort or "").strip(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        json.dumps(_model_pref_payload(model, reasoning_effort, model_provider), ensure_ascii=False, indent=2)
         + "\n",
         encoding="utf-8",
     )
@@ -535,6 +535,86 @@ def write_feishu_model_into_config(
         pass
     save_feishu_model_prefs(model, reasoning_effort, model_provider)
     return target_path
+
+
+def _model_choice_identity(choice: dict[str, str]) -> tuple[str, str, str]:
+    return (
+        str(choice.get("model_provider") or choice.get("provider") or "").strip(),
+        str(choice.get("model") or choice.get("name") or "").strip(),
+        str(choice.get("reasoning_effort") or choice.get("reasoning") or "").strip(),
+    )
+
+
+def _current_model_choice(codex_home: Optional[str | Path] = None) -> dict[str, str]:
+    config, _, _ = load_codex_config(codex_home)
+    return _model_pref_payload(
+        str(config.get("model") or "").strip(),
+        str(config.get("model_reasoning_effort") or config.get("reasoning_effort") or "").strip(),
+        str(config.get("model_provider") or "").strip(),
+    )
+
+
+def parse_feishu_fallback_model_choices(
+    value: str,
+    *,
+    codex_home: Optional[str | Path] = None,
+) -> list[dict[str, str]]:
+    """Parse fallback model specs from env.
+
+    Supported separators:
+      - newline, comma, or semicolon between choices
+      - `provider|model|reasoning`, `provider/model/reasoning`, or
+        the same free-form syntax accepted by `/model`
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    specs = [item.strip() for item in re.split(r"[\n,;]+", raw) if item.strip()]
+    choices: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for spec in specs:
+        normalized = spec
+        if "|" in normalized:
+            parts = [part.strip() for part in normalized.split("|") if part.strip()]
+            normalized = " ".join(parts)
+        choice, reason = resolve_feishu_model_choice(normalized, codex_home=codex_home)
+        if choice is None:
+            LOG.warning("Ignoring invalid Feishu fallback model spec %r: %s", spec, reason)
+            continue
+        identity = _model_choice_identity(choice)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        choices.append(choice)
+    return choices
+
+
+_FALLBACK_ERROR_RE = re.compile(
+    r"(?i)("
+    r"余额不足|额度不足|余额不够|账户余额|欠费|充值|"
+    r"insufficient[_ -]?(?:balance|quota|credit|funds)|"
+    r"quota|credit|balance|billing|payment|required|"
+    r"rate[_ -]?limit|too many requests|429|"
+    r"unauthorized|invalid api key|invalid_api_key|401|403|"
+    r"503|502|500|upstream|overloaded|temporarily unavailable|timeout|timed out"
+    r")"
+)
+
+
+def should_try_fallback_model(result: TurnResult) -> bool:
+    if result.interrupted:
+        return False
+    text = "\n".join(
+        part
+        for part in (
+            str(result.error or ""),
+            str(result.final_text or ""),
+        )
+        if part
+    )
+    if not text:
+        return False
+    return bool(_FALLBACK_ERROR_RE.search(text))
 
 
 def codex_home_dir(codex_home: Optional[str | Path] = None) -> Path:
@@ -2345,6 +2425,8 @@ class CodexFeishuService:
                 "- `/model fhl gpt-5.4 high` 按供应商/API 精确切换",
                 "- `/model gpt-5.4 high` 只有一个供应商匹配时可省略供应商",
                 "- 以后多个供应商有同名模型时，请加供应商前缀",
+                "",
+                self.fallback_model_help_text(),
             ]
         ).strip()
 
@@ -2374,6 +2456,82 @@ class CodexFeishuService:
                 f"配置已写入：`{config_path}`",
             ]
         ).strip()
+
+    def fallback_model_choices(self) -> list[dict[str, str]]:
+        raw = (
+            os.getenv("CODEX_FEISHU_FALLBACK_MODELS", "").strip()
+            or os.getenv("CODEX_FEISHU_FALLBACK_MODEL", "").strip()
+        )
+        choices = parse_feishu_fallback_model_choices(raw, codex_home=self.codex_home)
+        current = _model_choice_identity(_current_model_choice(self.codex_home))
+        return [choice for choice in choices if _model_choice_identity(choice) != current]
+
+    def fallback_model_help_text(self) -> str:
+        choices = self.fallback_model_choices()
+        if not choices:
+            return "备用模型：未配置"
+        lines = ["备用模型："]
+        for choice in choices:
+            provider_label = choice.get("provider_label") or choice.get("model_provider") or "default"
+            lines.append(f"- {provider_label} / {choice['model']} {choice['reasoning_effort']}")
+        return "\n".join(lines)
+
+    def apply_model_choice(self, choice: dict[str, str]) -> str:
+        config_path = write_feishu_model_into_config(
+            self.codex_home or DEFAULT_FEISHU_CODEX_HOME,
+            choice["model"],
+            choice["reasoning_effort"],
+            choice["model_provider"],
+        )
+        self._runtime_signature = None
+        return str(config_path)
+
+    async def run_codex_turn_with_fallback(
+        self,
+        *,
+        run_once: Callable[[], Awaitable[TurnResult]],
+        progress: CardProgress,
+        active_turn: Optional[ActiveTurn] = None,
+    ) -> TurnResult:
+        attempted: set[tuple[str, str, str]] = set()
+        attempted.add(_model_choice_identity(_current_model_choice(self.codex_home)))
+        result = await run_once()
+        if not should_try_fallback_model(result):
+            return result
+        fallback_choices = self.fallback_model_choices()
+        if not fallback_choices:
+            return result
+
+        first_error = normalize_text(result.error or result.final_text or "", 900)
+        for choice in fallback_choices:
+            identity = _model_choice_identity(choice)
+            if identity in attempted:
+                continue
+            attempted.add(identity)
+            if active_turn is not None and active_turn.interrupt_requested:
+                return result
+            provider_label = choice.get("provider_label") or choice.get("model_provider") or "default"
+            LOG.warning(
+                "Codex turn failed with fallback-worthy error; retrying with fallback provider=%s model=%s reasoning=%s",
+                choice.get("model_provider") or "<default>",
+                choice.get("model") or "<default>",
+                choice.get("reasoning_effort") or "<default>",
+            )
+            await progress.push_reasoning(
+                f"主模型返回可切换错误，准备改用备用模型 {provider_label} / {choice['model']} {choice['reasoning_effort']} 重试本轮任务。",
+                force=True,
+            )
+            self.apply_model_choice(choice)
+            retry_result = await run_once()
+            if not should_try_fallback_model(retry_result):
+                if first_error and retry_result.final_text:
+                    retry_result.final_text = (
+                        retry_result.final_text.rstrip()
+                        + "\n\n> 已从主模型失败自动切换到备用模型完成本轮任务。"
+                    )
+                return retry_result
+            result = retry_result
+        return result
 
     def session_key_for(self, event: MessageEvent) -> str:
         return "codex-feishu:" + build_session_key(
@@ -2679,11 +2837,15 @@ class CodexFeishuService:
                         chat_id,
                         progress.last_error or "unknown error",
                     )
-            result = await self.run_oneoff_codex_turn(
-                prompt=self.build_scheduled_prompt(task),
-                session_key=session_key,
+            result = await self.run_codex_turn_with_fallback(
+                run_once=lambda: self.run_oneoff_codex_turn(
+                    prompt=self.build_scheduled_prompt(task),
+                    session_key=session_key,
+                    progress=progress,
+                    chat_id=chat_id,
+                    active_turn=active_turn,
+                ),
                 progress=progress,
-                chat_id=chat_id,
                 active_turn=active_turn,
             )
             output_path = self.write_task_output(task, result)
@@ -3049,7 +3211,11 @@ class CodexFeishuService:
                         "Codex 本机任务库 · 已写入",
                     )
                     return
-                result = await self.run_codex_turn(event, session_key, progress, active_turn)
+                result = await self.run_codex_turn_with_fallback(
+                    run_once=lambda: self.run_codex_turn(event, session_key, progress, active_turn),
+                    progress=progress,
+                    active_turn=active_turn,
+                )
                 if result.error and self._stopping.is_set() and not progress.card_created:
                     outcome = ProcessingOutcome.FAILURE
                     LOG.info(

@@ -39,6 +39,7 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.codex.feishu.plist
 
 - The bridge replies through the same dedicated Feishu bot that receives the message.
 - Feishu keeps its own provider/API profile and model selection in `~/.codex-feishu/codex-home/config.toml` and `~/.codex-feishu/feishu-model.json`, so desktop model switches do not affect the bot. Use `/model` to inspect it and `/model <provider> <model> <reasoning>` to switch precisely.
+- Configure fallback models with `CODEX_FEISHU_FALLBACK_MODELS`, for example `yukihoapi|gpt-5.4|high`. If the active model fails with a retryable provider error such as insufficient balance, quota, rate limit, upstream 5xx, or timeout, the bridge switches to the next fallback model and retries the current turn.
 - Codex account login and API login do not share the same cloud thread; this bridge shares local memory, lightweight Feishu conversation summaries, and scheduled tasks through `~/.codex-feishu`.
 - Normal Feishu chat uses a fresh local Codex turn per message and only injects the rolling summary plus recent turns, so long Feishu history does not keep inflating one app-server session.
 - Feishu-created scheduled tasks are authoritative in `~/.codex-feishu/tasks.json` and mirrored into Codex automations for visibility. `com.codex.feishu` sleeps until the next due time, and Feishu task changes wake the scheduler to recalculate; tasks do not execute every 60 seconds.

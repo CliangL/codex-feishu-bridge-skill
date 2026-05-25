@@ -60,6 +60,7 @@ This skill turns Feishu / Lark into a messaging front end for your local Codex r
 - **可读的执行进展**：bridge 优先展示模型主动写出的 `执行进展：...`，看起来接近 Codex Desktop 的 commentary，而不是暴露原始命令日志。
 - **本机能力可用**：Codex 仍能使用本机 skills、MCP、文件、项目目录、记忆、自动化。
 - **飞书模型可独立切换**：`/model` 查看飞书侧当前 provider / model / reasoning；`/model <provider> <model> <reasoning>` 精确切换，不必跟桌面 Codex 同步。
+- **支持备用模型**：可配置 `CODEX_FEISHU_FALLBACK_MODELS`，主模型遇到余额不足、额度、限流、上游 5xx、超时等可切换错误时，会自动改用备用模型重试本轮任务。
 - **轻量会话记忆**：飞书对话只保留滚动摘要和最近几轮，避免长历史不断膨胀。
 - **共享本地记忆**：`USER_MEMORY.md`、`CODEX_FEISHU_MEMORY.md`、`AGENTS.md` 可放稳定的非密钥上下文，例如 NAS 别名、Home Assistant 地址、偏好规则。
 - **定时任务可见**：飞书创建的任务保存在 `~/.codex-feishu/tasks.json`，并镜像到 `$CODEX_HOME/automations`，Codex 也能看见。
@@ -176,6 +177,7 @@ CODEX_FEISHU_DOMAIN=feishu
 CODEX_FEISHU_CONNECTION_MODE=websocket
 CODEX_FEISHU_NOTIFY_CHAT_ID=FEISHU_NOTIFY_CHAT_ID
 CODEX_FEISHU_REQUIRE_MENTION=false
+CODEX_FEISHU_FALLBACK_MODELS=yukihoapi|gpt-5.4|high
 ```
 
 不要把 `.env`、日志、对话记忆、真实 chat id 或 token 提交到仓库。
@@ -236,6 +238,7 @@ launchctl print gui/$(id -u)/com.codex.feishu
 - `/model`：查看飞书侧当前 provider、model、reasoning 和可选模型。
 - `/model <provider> <model> <reasoning>`：按 provider 精确切换，例如 `/model fhl gpt-5.4 high`。
 - `/model <model> <reasoning>`：只有模型名在所有 provider 中不冲突时才允许省略 provider。
+- `CODEX_FEISHU_FALLBACK_MODELS`：本地 `.env` 里的备用模型列表，支持逗号、分号或换行分隔，单项格式推荐 `provider|model|reasoning`，例如 `yukihoapi|gpt-5.4|high`。
 - `/task daily HH:MM ...`：创建每日任务。
 - `/task every 30m ...`：创建间隔任务。
 - `/task at YYYY-MM-DDTHH:MM ...`：创建一次性任务。
@@ -365,6 +368,7 @@ python3 codex-feishu-bridge/scripts/verify_codex_feishu_bridge.py --home "$HOME/
 - Keeps a bounded Feishu-side conversation memory so long chat history does not grow forever.
 - Shares local Codex skills, MCP tools, memories, sessions, plugins, automations, and auth state from your main `$CODEX_HOME`.
 - Keeps a Feishu-specific `codex-home` so the bot can use an independent provider / model / reasoning profile.
+- Supports fallback models through `CODEX_FEISHU_FALLBACK_MODELS`; retryable provider failures such as insufficient balance, quota, rate limits, upstream 5xx, or timeouts can automatically switch to the next configured model for the current task.
 - Mirrors Feishu-created scheduled tasks into `$CODEX_HOME/automations` for Codex visibility.
 - Supports notification-only chats where scheduled output is clean final content without tool/progress/footer noise.
 
@@ -481,6 +485,14 @@ Feishu chat commands:
 /new
 /reset
 ```
+
+Fallback models are configured locally in `.env`:
+
+```bash
+CODEX_FEISHU_FALLBACK_MODELS=yukihoapi|gpt-5.4|high
+```
+
+Use comma, semicolon, or newline separators for multiple candidates. Each item can use `provider|model|reasoning`, `provider/model/reasoning`, or the same free-form syntax accepted by `/model`.
 
 Local verification and task management:
 
