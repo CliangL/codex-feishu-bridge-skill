@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>CODEX_FEISHU_ENV_FILE</key>
+		<string>$HOME/.codex-feishu/.env</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.codex.feishu.deepseek-responses-proxy</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>set -euo pipefail
+ENV_FILE="${CODEX_FEISHU_ENV_FILE:-$HOME/.codex-feishu/.env}"
+api_key=""
+if [[ -f "$ENV_FILE" ]]; then
+  api_key=$(python3 - &lt;&lt;'PYENV' "$ENV_FILE"
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+value = ''
+for raw in path.read_text(encoding='utf-8', errors='replace').splitlines():
+    line = raw.strip()
+    if not line or line.startswith('#') or '=' not in line:
+        continue
+    key, val = line.split('=', 1)
+    if key.strip() == 'DEEPSEEK_API_KEY':
+        value = val.strip().strip('\"').strip("'")
+        break
+print(value)
+PYENV
+)
+fi
+if [[ -z "$api_key" ]]; then
+  echo "DeepSeek API key is missing from $ENV_FILE" &gt;&amp;2
+  exit 1
+fi
+mkdir -p "$HOME/.codex-feishu/logs"
+echo $$ &gt; "$HOME/.codex-feishu/deepseek-responses-proxy.pid"
+exec env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" HOME="$HOME" DEEPSEEK_API_KEY="$api_key" DEEPSEEK_PROXY_HOST=127.0.0.1 DEEPSEEK_PROXY_PORT=48765 DEEPSEEK_UPSTREAM_BASE_URL=https://api.deepseek.com RESPONSES_PROXY_MODEL_IDS=deepseek-v4-flash,deepseek-v4-pro python3 "$HOME/.codex-feishu/app/launchd/deepseek_responses_proxy.py"
+</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>$HOME/.codex-feishu/logs/deepseek-responses-proxy.log</string>
+	<key>StandardOutPath</key>
+	<string>$HOME/.codex-feishu/logs/deepseek-responses-proxy.log</string>
+	<key>WorkingDirectory</key>
+	<string>$HOME/.codex-feishu/app</string>
+</dict>
+</plist>

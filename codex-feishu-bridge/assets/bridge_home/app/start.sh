@@ -17,6 +17,14 @@ fi
 export CODEX_FEISHU_RUNTIME_SRC="${CODEX_FEISHU_RUNTIME_SRC:-${HOME}/.codex-feishu/runtime/src}"
 export PYTHONPATH="${CODEX_FEISHU_RUNTIME_SRC}${PYTHONPATH:+:${PYTHONPATH}}"
 
+# Keep the Feishu bridge isolated from the desktop Codex helper. The bridge
+# loads model credentials from its own env file below, not from launchctl globals.
+while IFS='=' read -r name _; do
+  case "$name" in
+    HERMES_CODEX_*) unset "$name" ;;
+  esac
+done < <(env)
+
 exec "${PYTHON_BIN}" "${APP_DIR}/codex_feishu_app.py" \
   --workspace "${CODEX_FEISHU_WORKSPACE:-${DEFAULT_WORKSPACE}}" \
   --codex-bin "${CODEX_BIN}" \

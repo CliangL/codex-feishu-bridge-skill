@@ -152,6 +152,7 @@ python3 codex-feishu-bridge/scripts/install_codex_feishu_bridge.py \
 - `--workspace`：飞书任务默认工作区，默认 `~/.codex-feishu/workspace`。
 - `--allowed-users`：可选，限制允许使用 bot 的 open_id。
 - `--install-launch-agent`：在 macOS 安装 `com.codex.feishu` LaunchAgent。
+- DeepSeek 备用模型代理也属于飞书 bridge 自身：LaunchAgent 目录和启动脚本都在 `~/.codex-feishu/app/launchd/`，服务标签是 `com.codex.feishu.deepseek-responses-proxy`，日志写入 `~/.codex-feishu/logs/deepseek-responses-proxy.log`。它不依赖桌面 `codex助手.app`、`~/.codex-handoff` 或 `hermes医生/.launch`。
 - `--dry-run`：只展示将要做什么，不实际写入。
 
 ### 3. 配置或检查本地 `.env`
@@ -177,7 +178,7 @@ CODEX_FEISHU_DOMAIN=feishu
 CODEX_FEISHU_CONNECTION_MODE=websocket
 CODEX_FEISHU_NOTIFY_CHAT_ID=FEISHU_NOTIFY_CHAT_ID
 CODEX_FEISHU_REQUIRE_MENTION=false
-CODEX_FEISHU_FALLBACK_MODELS=provider-name|model-name|medium
+CODEX_FEISHU_FALLBACK_MODELS=provider-name|model-name
 ```
 
 不要把 `.env`、日志、对话记忆、真实 chat id 或 token 提交到仓库。
@@ -225,8 +226,9 @@ launchctl print gui/$(id -u)/com.codex.feishu
 /model fhl gpt-5.4
 /model gpt-5.4 medium
 /fallback-model
-/fallback-model set backup-api gpt-5.4-mini medium
-/fallback-model add another-api model-name low
+/fallback-model test
+/fallback-model set backup-api gpt-5.4-mini
+/fallback-model add another-api model-name
 /task daily 08:30 整理今天日程和待办
 /task every 30m 检查下载状态
 /task at 2026-05-25T09:00 提醒我更新日报
@@ -244,10 +246,12 @@ launchctl print gui/$(id -u)/com.codex.feishu
 - `/model <model>`：只有模型名在所有 provider 中不冲突时才允许省略 provider。
 - `/model` 列表只显示各 provider 自己支持的模型名；如果 provider 声明了模型目录，会避免把 GPT 显示到 DeepSeek 分类下。
 - `/fallback-model`：查看飞书侧备用模型列表。
-- `/fallback-model set <provider> <model> <reasoning>`：替换备用模型列表，例如 `/fallback-model set backup-api gpt-5.4-mini medium`。
-- `/fallback-model add <provider> <model> <reasoning>`：追加一个备用模型，主模型失败后会按列表顺序尝试。
+- `/fallback-model test`：临时切到第一个备用模型并真实调用一次，测试完成后自动恢复主模型。
+- `/fallback-model set <provider> <model> [reasoning]`：替换备用模型列表，例如 `/fallback-model set backup-api gpt-5.4-mini`；只有模型支持 reasoning 时才需要第三段。
+- `/fallback-model add <provider> <model> [reasoning]`：追加一个备用模型，主模型失败后会按列表顺序尝试。
 - `/fallback-model clear`：清空备用模型列表。
-- `CODEX_FEISHU_FALLBACK_MODELS`：本地 `.env` 里的启动默认备用模型列表，支持逗号、分号或换行分隔，单项格式推荐 `provider|model|reasoning`，例如 `backup-api|gpt-5.4-mini|medium`。运行后也可以用 `/fallback-model` 命令改成其他 provider 自己支持的模型。
+- 普通自然语言“测试一下备用模型 / 检测回退模型是否可用”也会进入同一条真实备用模型测试链路，不会再交给主模型自行判断。
+- `CODEX_FEISHU_FALLBACK_MODELS`：本地 `.env` 里的启动默认备用模型列表，支持逗号、分号或换行分隔，单项格式推荐 `provider|model` 或 `provider|model|reasoning`，例如 `backup-api|gpt-5.4-mini`。运行后也可以用 `/fallback-model` 命令改成其他 provider 自己支持的模型。
 - 模型目录可声明 `supports_reasoning=false`；这类模型切换和回退时只写 provider/model，不会继承或写入 Codex reasoning 字段。
 - `/task daily HH:MM ...`：创建每日任务。
 - `/task every 30m ...`：创建间隔任务。
@@ -277,6 +281,8 @@ $HOME/.codex-feishu/
   feishu-model.json            # 飞书侧 provider/model/reasoning 偏好
   app/
     codex_feishu_app.py        # bridge 主程序
+    launchd/
+      deepseek_responses_proxy.py # 飞书 LaunchAgent 启动的 DeepSeek Responses 代理
     start.sh                   # 启动入口
     configure.sh               # 本地交互配置
     conversation_memory.py     # 飞书轻量会话记忆
@@ -307,6 +313,7 @@ macOS LaunchAgent：
 
 ```text
 $HOME/Library/LaunchAgents/com.codex.feishu.plist
+$HOME/Library/LaunchAgents/com.codex.feishu.deepseek-responses-proxy.plist
 ```
 
 ## 安全边界
@@ -489,8 +496,9 @@ Feishu chat commands:
 /model <provider> <model> <reasoning>
 /model <model>
 /fallback-model
-/fallback-model set <provider> <model> <reasoning>
-/fallback-model add <provider> <model> <reasoning>
+/fallback-model test
+/fallback-model set <provider> <model> [reasoning]
+/fallback-model add <provider> <model> [reasoning]
 /fallback-model clear
 /task daily HH:MM <prompt>
 /task every 30m <prompt>
@@ -504,10 +512,10 @@ Feishu chat commands:
 Fallback models are a generic ordered list, not a fixed provider choice. You can seed the initial list locally in `.env`:
 
 ```bash
-CODEX_FEISHU_FALLBACK_MODELS=provider-name|model-name|medium
+CODEX_FEISHU_FALLBACK_MODELS=provider-name|model-name
 ```
 
-Use comma, semicolon, or newline separators for multiple candidates. Each item can use `provider|model|reasoning`, `provider/model/reasoning`, or the same free-form syntax accepted by `/model`. At runtime, use `/fallback-model`, `/fallback-model set <provider> <model> <reasoning>`, `/fallback-model add <provider> <model> <reasoning>`, and `/fallback-model clear` from Feishu to inspect or change the list without editing the repository. If a provider declares a model catalog, the bridge only shows and accepts models from that provider's own catalog. Catalog entries may set `supports_reasoning=false`; those models are selected by name only and do not inherit the current Codex reasoning field.
+Use comma, semicolon, or newline separators for multiple candidates. Each item can use `provider|model`, optional `provider|model|reasoning`, `provider/model[/reasoning]`, or the same free-form syntax accepted by `/model`. At runtime, use `/fallback-model`, `/fallback-model test`, `/fallback-model set <provider> <model> [reasoning]`, `/fallback-model add <provider> <model> [reasoning]`, and `/fallback-model clear` from Feishu to inspect, test, or change the list without editing the repository. Natural-language requests such as "test fallback model" or "检测备用模型是否可用" also run the same real fallback probe. If a provider declares a model catalog, the bridge only shows and accepts models from that provider's own catalog. Catalog entries may set `supports_reasoning=false`; those models are selected by name only and do not inherit the current Codex reasoning field. A fallback retry is temporary for the current turn; after the retry/test, the bridge restores the primary Feishu model.
 
 Local verification and task management:
 

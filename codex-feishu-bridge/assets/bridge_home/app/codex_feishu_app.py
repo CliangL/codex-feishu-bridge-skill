@@ -193,6 +193,37 @@ def read_env_value_from_file(path: Path, key: str) -> Optional[str]:
     return read_env_file(path).get(key)
 
 
+def load_codex_env_from_file(path: Path) -> dict[str, str]:
+    """Load model/provider credentials owned by this Feishu bridge."""
+    values: dict[str, str] = {}
+    for key, value in read_env_file(path).items():
+        if (
+            key.startswith("HERMES_CODEX_")
+            or key.startswith("OPENAI_")
+            or key in {"DEEPSEEK_API_KEY"}
+        ):
+            values[key] = value
+    return values
+
+
+def apply_codex_env_values(values: dict[str, str]) -> None:
+    for key in list(os.environ):
+        if key.startswith("HERMES_CODEX_"):
+            os.environ.pop(key, None)
+            _MANAGED_CODEX_ENV_VALUES.pop(key, None)
+    for key, value in values.items():
+        os.environ[key] = value
+        _MANAGED_CODEX_ENV_VALUES[key] = value
+
+
+def codex_env_for_spawn(env_file: Optional[Path] = None) -> dict[str, str]:
+    if env_file is None:
+        env_file = DEFAULT_ENV_FILE
+    values = load_codex_env_from_file(env_file)
+    apply_codex_env_values(values)
+    return values
+
+
 def ensure_dir(path: Path, *, mode: int = 0o700) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     try:
@@ -902,20 +933,20 @@ def current_codex_runtime_state(
             config_mtime_ns=config_mtime_ns,
         )
 
-    process_value = os.getenv(env_key, "").strip()
     managed_value = _MANAGED_CODEX_ENV_VALUES.get(env_key, "")
     env_value = ""
     env_source = "missing"
 
-    if process_value and process_value != managed_value:
-        env_value = process_value
-        env_source = "process"
-    elif env_file is not None:
+    if env_file is not None:
         env_value = (read_env_value_from_file(env_file, env_key) or "").strip()
         if env_value:
             os.environ[env_key] = env_value
             _MANAGED_CODEX_ENV_VALUES[env_key] = env_value
             env_source = f"env-file:{env_file}"
+    process_value = os.getenv(env_key, "").strip()
+    if not env_value and process_value and process_value == managed_value:
+        env_value = process_value
+        env_source = "managed-process"
     if not env_value:
         env_value, snapshot_name = load_env_value_from_shell_snapshots(env_key, codex_home=codex_home)
         env_value = (env_value or "").strip()
@@ -1042,6 +1073,18 @@ def parse_fallback_model_command(text: str) -> Optional[str]:
     if not match:
         return None
     return (match.group(1) or "").strip()
+
+
+def is_fallback_model_test_request(text: str) -> bool:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return False
+    target = re.search(r"(备用|备份|回退|后备|fallback|backup)", raw)
+    action = re.search(
+        r"(测试|检测|检查|验证|可用|能不能用|是否能用|通不通|连通|health|test|check)",
+        raw,
+    )
+    return bool(target and action)
 
 
 def normalize_text(text: str, limit: int = 12000) -> str:
@@ -2637,8 +2680,9 @@ class CodexFeishuService:
                 "- `/model gpt-5.4` 只有一个供应商匹配时可省略供应商",
                 "- 以后多个供应商有同名模型时，请加供应商前缀",
                 "- `/fallback-model` 查看备用模型",
-                "- `/fallback-model set <provider> <model> <reasoning>` 设置备用模型列表",
-                "- `/fallback-model add <provider> <model> <reasoning>` 追加备用模型",
+                "- `/fallback-model test` 真实调用第一个备用模型做连通性测试",
+                "- `/fallback-model set <provider> <model> [reasoning]` 设置备用模型列表",
+                "- `/fallback-model add <provider> <model> [reasoning]` 追加备用模型",
                 "- `/fallback-model clear` 清空备用模型",
                 "",
                 self.fallback_model_help_text(),
@@ -2706,11 +2750,12 @@ class CodexFeishuService:
                 "",
                 "用法：",
                 "- `/fallback-model` 查看当前备用模型列表",
-                "- `/fallback-model set <provider> <model> <reasoning>` 替换备用模型列表",
-                "- `/fallback-model add <provider> <model> <reasoning>` 追加一个备用模型",
+                "- `/fallback-model test` 真实调用第一个备用模型做连通性测试",
+                "- `/fallback-model set <provider> <model> [reasoning]` 替换备用模型列表",
+                "- `/fallback-model add <provider> <model> [reasoning]` 追加一个备用模型",
                 "- `/fallback-model clear` 清空备用模型列表",
                 "",
-                "说明：备用模型是通用机制，不绑定任何固定供应商；如果 provider 声明了模型目录，只能选择该 provider 目录里的模型。",
+                "说明：备用模型是通用机制，不绑定任何固定供应商；reasoning 可省略，不支持 reasoning 的模型只写 provider 和 model。如果 provider 声明了模型目录，只能选择该 provider 目录里的模型。",
             ]
         ).strip()
 
@@ -2721,6 +2766,8 @@ class CodexFeishuService:
 
         head, _, tail = command.partition(" ")
         action = head.strip().lower()
+        if action in {"test", "check", "health", "测试", "检测"}:
+            return True, "__FALLBACK_MODEL_TEST__"
         if action in {"clear", "off", "disable", "none", "关闭", "清空"}:
             path = save_feishu_fallback_models([])
             return True, "\n".join(
@@ -2779,6 +2826,67 @@ class CodexFeishuService:
         self._runtime_signature = None
         return str(config_path)
 
+    def restore_model_choice(self, choice: dict[str, str]) -> str:
+        config_path = write_feishu_model_into_config(
+            self.codex_home or DEFAULT_FEISHU_CODEX_HOME,
+            choice["model"],
+            choice["reasoning_effort"],
+            choice["model_provider"],
+        )
+        self._runtime_signature = None
+        return str(config_path)
+
+    async def run_fallback_model_test(self, progress: CardProgress) -> str:
+        fallback_choices = self.fallback_model_choices()
+        if not fallback_choices:
+            return "备用模型：未配置，无法测试。"
+
+        original_choice = _current_model_choice(self.codex_home)
+        choice = fallback_choices[0]
+        provider_label = choice.get("provider_label") or choice.get("model_provider") or "default"
+        await progress.push_reasoning(
+            f"正在临时切换到备用模型 {provider_label} / {choice['model']} 做真实调用测试。",
+            force=True,
+        )
+        try:
+            self.apply_model_choice(choice)
+            self.prepare_codex_runtime()
+            test_prompt = (
+                "请只回复下面这行文字，不要添加解释：\n"
+                "fallback-ok"
+            )
+            result = await self.run_oneoff_codex_turn(
+                prompt=test_prompt,
+                session_key=f"{progress.session_key}:fallback-test",
+                progress=progress,
+                chat_id=progress.chat_id,
+            )
+            if result.error:
+                return "\n".join(
+                    [
+                        f"备用模型测试失败：{provider_label} / {choice['model']}",
+                        "",
+                        "错误：",
+                        f"```text\n{normalize_text(result.error, 4000)}\n```",
+                    ]
+                ).strip()
+            text = normalize_text(result.final_text or "", 1000)
+            if "fallback-ok" in text.lower():
+                status = "备用模型测试成功。"
+            else:
+                status = "备用模型已返回内容，但没有严格返回预期探针文本。"
+            return "\n".join(
+                [
+                    status,
+                    "",
+                    f"- 备用模型：{provider_label} / {choice['model']}",
+                    f"- 返回：`{text or '空响应'}`",
+                ]
+            ).strip()
+        finally:
+            self.restore_model_choice(original_choice)
+            self.prepare_codex_runtime()
+
     async def run_codex_turn_with_fallback(
         self,
         *,
@@ -2787,7 +2895,8 @@ class CodexFeishuService:
         active_turn: Optional[ActiveTurn] = None,
     ) -> TurnResult:
         attempted: set[tuple[str, str, str]] = set()
-        attempted.add(_model_choice_identity(_current_model_choice(self.codex_home)))
+        original_choice = _current_model_choice(self.codex_home)
+        attempted.add(_model_choice_identity(original_choice))
         result = await run_once()
         if not should_try_fallback_model(result):
             return result
@@ -2796,37 +2905,42 @@ class CodexFeishuService:
             return result
 
         first_error = normalize_text(result.error or result.final_text or "", 900)
-        for choice in fallback_choices:
-            identity = _model_choice_identity(choice)
-            if identity in attempted:
-                continue
-            attempted.add(identity)
-            if active_turn is not None and active_turn.interrupt_requested:
-                return result
-            provider_label = choice.get("provider_label") or choice.get("model_provider") or "default"
-            LOG.warning(
-                "Codex turn failed with fallback-worthy error; retrying with fallback provider=%s model=%s reasoning=%s",
-                choice.get("model_provider") or "<default>",
-                choice.get("model") or "<default>",
-                choice.get("reasoning_effort") or "<default>",
-            )
-            await progress.push_reasoning(
-                f"主模型返回可切换错误，准备改用备用模型 {provider_label} / {choice['model']}"
-                + (f" {choice['reasoning_effort']}" if choice.get("reasoning_effort") else "")
-                + " 重试本轮任务。",
-                force=True,
-            )
-            self.apply_model_choice(choice)
-            retry_result = await run_once()
-            if not should_try_fallback_model(retry_result):
-                if first_error and retry_result.final_text:
-                    retry_result.final_text = (
-                        retry_result.final_text.rstrip()
-                        + "\n\n> 已从主模型失败自动切换到备用模型完成本轮任务。"
-                    )
-                return retry_result
-            result = retry_result
-        return result
+        try:
+            for choice in fallback_choices:
+                identity = _model_choice_identity(choice)
+                if identity in attempted:
+                    continue
+                attempted.add(identity)
+                if active_turn is not None and active_turn.interrupt_requested:
+                    return result
+                provider_label = choice.get("provider_label") or choice.get("model_provider") or "default"
+                LOG.warning(
+                    "Codex turn failed with fallback-worthy error; retrying with fallback provider=%s model=%s reasoning=%s",
+                    choice.get("model_provider") or "<default>",
+                    choice.get("model") or "<default>",
+                    choice.get("reasoning_effort") or "<default>",
+                )
+                await progress.push_reasoning(
+                    f"主模型返回可切换错误，准备改用备用模型 {provider_label} / {choice['model']}"
+                    + (f" {choice['reasoning_effort']}" if choice.get("reasoning_effort") else "")
+                    + " 重试本轮任务。",
+                    force=True,
+                )
+                self.apply_model_choice(choice)
+                self.prepare_codex_runtime()
+                retry_result = await run_once()
+                if not should_try_fallback_model(retry_result):
+                    if first_error and retry_result.final_text:
+                        retry_result.final_text = (
+                            retry_result.final_text.rstrip()
+                            + "\n\n> 已从主模型失败自动切换到备用模型完成本轮任务。"
+                        )
+                    return retry_result
+                result = retry_result
+            return result
+        finally:
+            self.restore_model_choice(original_choice)
+            self.prepare_codex_runtime()
 
     def session_key_for(self, event: MessageEvent) -> str:
         return "codex-feishu:" + build_session_key(
@@ -3232,6 +3346,7 @@ class CodexFeishuService:
         active_turn: Optional[ActiveTurn] = None,
     ) -> TurnResult:
         async with self.get_turn_gate():
+            spawn_env = codex_env_for_spawn(self.env_file)
             self.prepare_codex_runtime()
             routing = _ServerRequestRouting(
                 auto_approve_exec=self.auto_approve_exec,
@@ -3255,6 +3370,7 @@ class CodexFeishuService:
                 approval_callback=approval,
                 on_event=lambda note: self.on_codex_event(progress, note),
                 request_routing=routing,
+                env=spawn_env,
             )
             if active_turn is not None:
                 active_turn.session = session
@@ -3433,11 +3549,35 @@ class CodexFeishuService:
             try:
                 await progress.seed()
                 ok, message = self.update_fallback_models(fallback_model_command_arg)
+                if message == "__FALLBACK_MODEL_TEST__":
+                    message = await self.run_fallback_model_test(progress)
                 await progress.final(message, "飞书备用模型已更新" if ok else "飞书备用模型设置失败")
                 return
             except Exception:
                 outcome = ProcessingOutcome.FAILURE
                 LOG.exception("fallback model command failed")
+                raise
+            finally:
+                await self.adapter.on_processing_complete(event, outcome)
+        if is_fallback_model_test_request(event.text):
+            await self.adapter.on_processing_start(event)
+            outcome = ProcessingOutcome.SUCCESS
+            progress = CardProgress(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                session_key=f"{session_key}:fallback-model-test:{reply_to or now_ms()}",
+                card_key=f"{session_key}:fallback-model-test:{reply_to or now_ms()}",
+                adapter=self.adapter,
+                prompt=event.text,
+            )
+            try:
+                await progress.seed()
+                message = await self.run_fallback_model_test(progress)
+                await progress.final(message, "飞书备用模型连通性测试")
+                return
+            except Exception:
+                outcome = ProcessingOutcome.FAILURE
+                LOG.exception("fallback model natural-language test failed")
                 raise
             finally:
                 await self.adapter.on_processing_complete(event, outcome)
@@ -3604,6 +3744,7 @@ class CodexFeishuService:
         active_turn: Optional[ActiveTurn] = None,
     ) -> TurnResult:
         async with self.get_turn_gate():
+            spawn_env = codex_env_for_spawn(self.env_file)
             self.prepare_codex_runtime()
             approval = FeishuApprovalBridge(
                 adapter=self.adapter,
@@ -3625,6 +3766,7 @@ class CodexFeishuService:
                 approval_callback=approval,
                 on_event=lambda note: self.on_codex_event(progress, note),
                 request_routing=routing,
+                env=spawn_env,
             )
             if active_turn is not None:
                 active_turn.session = session
@@ -3904,6 +4046,117 @@ def run_check(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+class _LocalFallbackTestAdapter:
+    async def _upsert_single_response_card(self, **_: Any):
+        from gateway.platforms.base import SendResult
+
+        return SendResult(success=True, message_id="local-fallback-test")
+
+
+async def run_fallback_model_test_cli(args: argparse.Namespace) -> int:
+    env_file = Path(args.env_file).expanduser().resolve()
+    apply_codex_feishu_env(env_file)
+    workspace = Path(args.workspace).expanduser().resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    codex_home = ensure_feishu_codex_home(args.codex_home or None)
+    service = CodexFeishuService(
+        adapter=_LocalFallbackTestAdapter(),  # type: ignore[arg-type]
+        workspace=workspace,
+        codex_bin=args.codex_bin,
+        codex_home=codex_home,
+        env_file=env_file,
+        turn_timeout=args.turn_timeout,
+        approval_timeout=args.approval_timeout,
+        auto_approve_exec=args.auto_approve_exec,
+        auto_approve_apply_patch=args.auto_approve_apply_patch,
+        permission_profile=args.permission_profile,
+        task_poll_seconds=args.task_poll_seconds,
+        task_batch_limit=args.task_batch_limit,
+    )
+    service.loop = asyncio.get_running_loop()
+    progress = CardProgress(
+        chat_id="local-fallback-test",
+        reply_to=None,
+        session_key=f"local:fallback-model-test:{now_ms()}",
+        card_key=f"local:fallback-model-test:{now_ms()}",
+        adapter=service.adapter,
+        prompt="/fallback-model test",
+        notification_only=True,
+    )
+    service.register_progress(progress)
+    try:
+        message = await service.run_fallback_model_test(progress)
+    finally:
+        service.unregister_progress(progress)
+    print(message)
+    return 0 if "备用模型测试成功" in message else 1
+
+
+async def run_fallback_auto_test_cli(args: argparse.Namespace) -> int:
+    env_file = Path(args.env_file).expanduser().resolve()
+    apply_codex_feishu_env(env_file)
+    workspace = Path(args.workspace).expanduser().resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    codex_home = ensure_feishu_codex_home(args.codex_home or None)
+    service = CodexFeishuService(
+        adapter=_LocalFallbackTestAdapter(),  # type: ignore[arg-type]
+        workspace=workspace,
+        codex_bin=args.codex_bin,
+        codex_home=codex_home,
+        env_file=env_file,
+        turn_timeout=args.turn_timeout,
+        approval_timeout=args.approval_timeout,
+        auto_approve_exec=args.auto_approve_exec,
+        auto_approve_apply_patch=args.auto_approve_apply_patch,
+        permission_profile=args.permission_profile,
+        task_poll_seconds=args.task_poll_seconds,
+        task_batch_limit=args.task_batch_limit,
+    )
+    service.loop = asyncio.get_running_loop()
+    progress = CardProgress(
+        chat_id="local-fallback-auto-test",
+        reply_to=None,
+        session_key=f"local:fallback-auto-test:{now_ms()}",
+        card_key=f"local:fallback-auto-test:{now_ms()}",
+        adapter=service.adapter,
+        prompt="simulate primary provider balance failure, then fallback",
+        notification_only=True,
+    )
+    original_choice = _current_model_choice(service.codex_home)
+    calls = 0
+
+    async def run_once() -> TurnResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return TurnResult(error="余额不足：simulated primary provider failure")
+        return await service.run_oneoff_codex_turn(
+            prompt="请只回复下面这行文字，不要添加解释：\nfallback-auto-ok",
+            session_key=f"{progress.session_key}:real-fallback",
+            progress=progress,
+            chat_id=progress.chat_id,
+        )
+
+    service.register_progress(progress)
+    try:
+        result = await service.run_codex_turn_with_fallback(run_once=run_once, progress=progress)
+    finally:
+        service.unregister_progress(progress)
+
+    restored = _model_choice_identity(_current_model_choice(service.codex_home)) == _model_choice_identity(original_choice)
+    text = normalize_text(result.final_text or "", 1000)
+    ok = (not result.error) and ("fallback-auto-ok" in text.lower()) and restored and calls >= 2
+    lines = [
+        "自动回退演练成功。" if ok else "自动回退演练失败。",
+        "",
+        f"- 调用次数：{calls}",
+        f"- 主模型已恢复：{'是' if restored else '否'}",
+        f"- 返回：`{text or normalize_text(result.error or '空响应', 1000)}`",
+    ]
+    print("\n".join(lines).strip())
+    return 0 if ok else 1
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local Codex <-> Feishu bridge")
     parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), help="Codex working directory")
@@ -3936,6 +4189,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--task-poll-seconds", type=int, default=int(os.getenv("CODEX_FEISHU_TASK_POLL_SECONDS", "60")))
     parser.add_argument("--task-batch-limit", type=int, default=int(os.getenv("CODEX_FEISHU_TASK_BATCH_LIMIT", "3")))
     parser.add_argument("--check", action="store_true", help="Check local configuration without connecting to Feishu")
+    parser.add_argument("--fallback-model-test", action="store_true", help="Run a real one-shot fallback model probe without connecting to Feishu")
+    parser.add_argument("--fallback-auto-test", action="store_true", help="Simulate a retryable primary-model failure and verify automatic fallback")
     parser.add_argument("--log-level", default=os.getenv("CODEX_FEISHU_LOG_LEVEL", "INFO"))
     return parser.parse_args(argv)
 
@@ -3952,6 +4207,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     logging.getLogger("Lark").setLevel(logging.WARNING)
     if args.check:
         return run_check(args)
+    if args.fallback_model_test:
+        return asyncio.run(run_fallback_model_test_cli(args))
+    if args.fallback_auto_test:
+        return asyncio.run(run_fallback_auto_test_cli(args))
     try:
         asyncio.run(run_app(args))
         return 0

@@ -96,6 +96,14 @@ export CODEX_FEISHU_HOME="${{CODEX_FEISHU_HOME:-{home}}}"
 export CODEX_FEISHU_RUNTIME_SRC="${{CODEX_FEISHU_RUNTIME_SRC:-{home / 'runtime' / 'src'}}}"
 export PYTHONPATH="${{CODEX_FEISHU_RUNTIME_SRC}}${{PYTHONPATH:+:${{PYTHONPATH}}}}"
 
+# Keep the Feishu bridge isolated from the desktop Codex helper. The bridge
+# loads model credentials from its own env file below, not from launchctl globals.
+while IFS='=' read -r name _; do
+  case "$name" in
+    HERMES_CODEX_*) unset "$name" ;;
+  esac
+done < <(env)
+
 exec "${{PYTHON_BIN}}" "${{APP_DIR}}/codex_feishu_app.py" \\
   --workspace "${{CODEX_FEISHU_WORKSPACE:-{home / 'workspace'}}}" \\
   --codex-bin "${{CODEX_BIN}}" \\
@@ -126,6 +134,54 @@ def ensure_launchd_template(home: Path) -> None:
     }
     with (launchd_dir / "com.codex.feishu.plist").open("wb") as fh:
         plistlib.dump(plist, fh)
+
+    deepseek_label = "com.codex.feishu.deepseek-responses-proxy"
+    deepseek_plist = {
+        "Label": deepseek_label,
+        "ProgramArguments": [
+            "/bin/zsh",
+            "-lc",
+            f"""set -euo pipefail
+ENV_FILE="${{CODEX_FEISHU_ENV_FILE:-{home / '.env'}}}"
+api_key=""
+if [[ -f "$ENV_FILE" ]]; then
+  api_key=$(python3 - <<'PYENV' "$ENV_FILE"
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+value = ''
+for raw in path.read_text(encoding='utf-8', errors='replace').splitlines():
+    line = raw.strip()
+    if not line or line.startswith('#') or '=' not in line:
+        continue
+    key, val = line.split('=', 1)
+    if key.strip() == 'DEEPSEEK_API_KEY':
+        value = val.strip().strip('\\"').strip("'")
+        break
+print(value)
+PYENV
+)
+fi
+if [[ -z "$api_key" ]]; then
+  echo "DeepSeek API key is missing from $ENV_FILE" >&2
+  exit 1
+fi
+mkdir -p "{home / 'logs'}"
+echo $$ > "{home / 'deepseek-responses-proxy.pid'}"
+exec env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" HOME="$HOME" DEEPSEEK_API_KEY="$api_key" DEEPSEEK_PROXY_HOST=127.0.0.1 DEEPSEEK_PROXY_PORT=48765 DEEPSEEK_UPSTREAM_BASE_URL=https://api.deepseek.com RESPONSES_PROXY_MODEL_IDS=deepseek-v4-flash,deepseek-v4-pro python3 "{home / 'app' / 'launchd' / 'deepseek_responses_proxy.py'}"
+""",
+        ],
+        "WorkingDirectory": str(home / "app"),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "StandardOutPath": str(home / "logs" / "deepseek-responses-proxy.log"),
+        "StandardErrorPath": str(home / "logs" / "deepseek-responses-proxy.log"),
+        "EnvironmentVariables": {
+            "CODEX_FEISHU_ENV_FILE": str(home / ".env"),
+        },
+    }
+    with (launchd_dir / f"{deepseek_label}.plist").open("wb") as fh:
+        plistlib.dump(deepseek_plist, fh)
 
 
 def create_venv(home: Path, *, skip_pip: bool) -> None:
