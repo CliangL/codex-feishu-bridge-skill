@@ -12,3 +12,5 @@ tasks.json.lock
 shared-memory.md
 feishu-model.json
 codex-home/
+!codex-feishu-bridge/assets/bridge_home/runtime/
+!codex-feishu-bridge/assets/bridge_home/runtime/**
